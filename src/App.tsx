@@ -706,7 +706,14 @@ const OrdersList = ({
         />
       </div>
       
-      {orders.filter(o => o.customerName.includes(searchTerm)).map(order => (
+      {orders.filter(o => {
+        const lowerSearch = searchTerm.toLowerCase();
+        return o.customerName.toLowerCase().includes(lowerSearch) ||
+               o.items.some(item => 
+                 item.machineName.toLowerCase().includes(lowerSearch) || 
+                 (item.variant && item.variant.toLowerCase().includes(lowerSearch))
+               );
+      }).map(order => (
         <motion.div 
           layout
           key={order.id} 
@@ -857,7 +864,7 @@ const CustomersList = ({
   const [sortBy, setSortBy] = useState<'name' | 'spent'>('spent');
 
   const sortedCustomers = [...customers]
-    .filter(c => c.name.includes(searchTerm))
+    .filter(c => c.name.toLowerCase().includes(searchTerm.toLowerCase()))
     .sort((a, b) => {
       if (sortBy === 'name') {
         return a.name.localeCompare(b.name, 'zh-Hant');
