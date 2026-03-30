@@ -1861,18 +1861,64 @@ const PrintPreview = ({
         </div>
 
         <div className="hidden sm:block flex-1 bg-ink/5 overflow-y-auto p-8">
-          <div ref={printRef} className="bg-white w-[210mm] min-h-[297mm] mx-auto p-12 shadow-2xl print:shadow-none print:m-0 print:w-full">
-            <div className="space-y-12">
+          <div ref={printRef} className="bg-white w-[210mm] min-h-[297mm] mx-auto p-12 shadow-2xl print:shadow-none print:m-0 print:w-full print:p-0">
+            <style>{`
+              @media print {
+                @page {
+                  size: A4;
+                  margin: 15mm;
+                }
+                .customer-section {
+                  break-inside: avoid;
+                  margin-bottom: 4rem;
+                }
+                .customer-section.long-order {
+                  break-inside: auto;
+                }
+                table {
+                  width: 100%;
+                  border-collapse: collapse;
+                }
+                thead {
+                  display: table-header-group;
+                }
+                tfoot {
+                  display: table-footer-group;
+                }
+                tr {
+                  break-inside: avoid;
+                  break-after: auto;
+                }
+              }
+            `}</style>
+            <div className="space-y-12 print:space-y-0">
               {customers.filter(c => selectedIds.includes(c.id)).map(customer => {
                 const custOrders = orders.filter(o => o.customerId === customer.id);
+                const allItems = custOrders.flatMap(o => o.items);
+                const isLongOrder = allItems.length > 15;
+
                 return (
-                  <div key={customer.id} className="border-b-2 border-divider pb-8 last:border-none">
-                    <div className="text-center mb-12">
-                      <h1 className="text-4xl font-bold text-ink border-b-4 border-ink pb-4 inline-block">{customer.name} 扭蛋訂單明細</h1>
-                      <p className="text-sm font-bold text-ink/60 mt-4">列印日期：{format(toZonedTime(new Date(), TAIWAN_TZ), 'yyyy/MM/dd')}</p>
-                    </div>
+                  <div 
+                    key={customer.id} 
+                    className={cn(
+                      "customer-section border-b-2 border-divider pb-8 last:border-none print:border-ink print:pb-12",
+                      isLongOrder && "long-order"
+                    )}
+                  >
                     <table className="w-full text-left">
                       <thead>
+                        <tr>
+                          <th colSpan={5} className="pb-8">
+                            <div className="text-center">
+                              <h1 className="text-3xl font-bold text-ink border-b-4 border-ink pb-2 inline-block">
+                                {customer.name} 扭蛋訂單明細
+                              </h1>
+                              <p className="text-xs font-bold text-ink/60 mt-2">
+                                列印日期：{format(toZonedTime(new Date(), TAIWAN_TZ), 'yyyy/MM/dd')}
+                              </p>
+                            </div>
+                          </th>
+                        </tr>
                         <tr className="border-b-2 border-ink text-sm">
                           <th className="py-2">機台名稱</th>
                           <th className="py-2">款式</th>
@@ -1882,8 +1928,8 @@ const PrintPreview = ({
                         </tr>
                       </thead>
                       <tbody>
-                        {custOrders.flatMap(o => o.items).map((item, idx) => (
-                          <tr key={idx} className="border-b border-divider text-sm">
+                        {allItems.map((item, idx) => (
+                          <tr key={idx} className="border-b border-divider text-sm print:border-ink/20">
                             <td className="py-3">{item.machineName}</td>
                             <td className="py-3">{item.variant || '-'}</td>
                             <td className="py-3">NT${item.price}</td>
@@ -1894,8 +1940,8 @@ const PrintPreview = ({
                       </tbody>
                       <tfoot>
                         <tr>
-                          <td colSpan={4} className="py-4 text-right font-bold text-lg">總計金額：</td>
-                          <td className="py-4 text-right font-bold text-2xl text-primary-blue">NT${customer.totalSpent}</td>
+                          <td colSpan={4} className="py-6 text-right font-bold text-lg">總計金額：</td>
+                          <td className="py-6 text-right font-bold text-2xl text-primary-blue print:text-ink">NT${customer.totalSpent}</td>
                         </tr>
                       </tfoot>
                     </table>
