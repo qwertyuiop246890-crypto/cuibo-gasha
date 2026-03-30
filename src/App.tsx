@@ -544,25 +544,12 @@ const CreateOrder = ({
             suggestions={machineSuggestions}
           />
           <div className="relative">
-            {selectedMachine ? (
-              <select 
-                value={variant}
-                onChange={(e) => setVariant(e.target.value)}
-                className="w-full px-4 py-4 bg-background rounded-2xl border-none focus:ring-2 focus:ring-primary-blue appearance-none"
-              >
-                <option value="">選擇款式 (選填)</option>
-                {selectedMachine.variants.map((v: string) => (
-                  <option key={v} value={v}>{v}</option>
-                ))}
-              </select>
-            ) : (
-              <SuggestiveInput 
-                value={variant}
-                onChange={setVariant}
-                placeholder="輸入款式 (選填)"
-                suggestions={variantSuggestions}
-              />
-            )}
+            <SuggestiveInput 
+              value={variant}
+              onChange={setVariant}
+              placeholder="輸入款式 (選填)"
+              suggestions={variantSuggestions}
+            />
           </div>
         </div>
         
