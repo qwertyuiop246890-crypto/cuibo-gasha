@@ -2107,21 +2107,27 @@ const Dashboard = ({
         <div className="bg-card-white p-6 rounded-3xl card-shadow">
           <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest mb-6">熱門機台</h3>
           <div className="space-y-4">
-            {Array.from(new Set(orders.flatMap(o => o.items.map(i => i.machineName)))).slice(0, 8).map(name => {
-              const count = orders.flatMap(o => o.items).filter(i => i.machineName === name).reduce((s, i) => s + i.quantity, 0);
-              const machine = machines.find(m => m.name === name);
-              return (
-                <div key={name} className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 bg-background rounded-lg flex items-center justify-center overflow-hidden flex-shrink-0">
-                      <Package className="w-4 h-4 text-ink/20" />
+            {Array.from(new Set(orders.flatMap(o => o.items.map(i => i.machineName))))
+              .map(name => ({
+                name,
+                count: orders.flatMap(o => o.items).filter(i => i.machineName === name).reduce((s, i) => s + i.quantity, 0)
+              }))
+              .sort((a, b) => b.count - a.count)
+              .slice(0, 8)
+              .map(({ name, count }) => {
+                const machine = machines.find(m => m.name === name);
+                return (
+                  <div key={name} className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 bg-background rounded-lg flex items-center justify-center overflow-hidden flex-shrink-0">
+                        <Package className="w-4 h-4 text-ink/20" />
+                      </div>
+                      <span className="font-bold text-ink">{name}</span>
                     </div>
-                    <span className="font-bold text-ink">{name}</span>
+                    <span className="text-sm font-bold text-primary-blue">{count} 個</span>
                   </div>
-                  <span className="text-sm font-bold text-primary-blue">{count} 個</span>
-                </div>
-              );
-            })}
+                );
+              })}
           </div>
         </div>
       </div>
