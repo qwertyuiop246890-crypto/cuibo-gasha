@@ -510,7 +510,12 @@ const CreateOrder = ({
   const selectedMachine = machines.find(m => m.name === machineName);
   const variantSuggestions = selectedMachine 
     ? selectedMachine.variants 
-    : Array.from(new Set(orders.flatMap(o => o.items.map(i => i.variant || '')))).filter(v => v && !v.includes('(環保)'));
+    : Array.from(new Set(
+        orders
+          .flatMap(o => o.items)
+          .filter(i => i.machineName === machineName)
+          .map(i => i.variant || '')
+      )).filter(v => v && !v.includes('(環保)'));
 
   return (
     <div className="space-y-6 pb-24">
