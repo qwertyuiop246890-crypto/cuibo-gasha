@@ -1,0 +1,156 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: customers
+    // Fields:
+    //   - name: string (required)
+    //   - phone: string (optional)
+    //   - lineId: string (optional)
+    //   - fbName: string (optional)
+    //   - totalSpent: number (required)
+    //   - orderCount: number (required)
+    //   - lastOrderAt: string (optional, date-time)
+    //   - createdAt: string (required, date-time)
+    //
+    // Collection: orders
+    // Fields:
+    //   - customerId: string (required)
+    //   - customerName: string (required)
+    //   - items: list (required)
+    //   - totalAmount: number (required)
+    //   - status: string (required, enum: pending, completed, cancelled)
+    //   - createdAt: string (required, date-time)
+    //   - updatedAt: string (required, date-time)
+    //
+    // Collection: settings
+    // Document ID: global
+    // Fields:
+    //   - notificationTemplate: string (required)
+    //   - priceMap: map (required)
+    //   - lastBackupAt: string (optional, date-time)
+    //
+    // Collection: machines
+    // Fields:
+    //   - name: string (required)
+    //   - defaultPrice: number (required)
+    //   - variants: list (required)
+    //   - createdAt: string (required, date-time)
+    //   - updatedAt: string (required, date-time)
+    //
+    // Collection: releases
+    // Fields:
+    //   - orderId: string (required)
+    //   - itemId: string (required)
+    //   - customerName: string (required)
+    //   - machineName: string (required)
+    //   - variant: string (optional)
+    //   - quantity: number (required)
+    //   - price: number (required)
+    //   - status: string (required, enum: pending, completed, cancelled)
+    //   - createdAt: string (required, date-time)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (request.auth.token.email in ["qwertyuiop246890@gmail.com", "cuibo.buy@gmail.com"] && 
+         (request.auth.token.email_verified == true || !('email_verified' in request.auth.token)));
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string &&
+        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+    function isValidCustomer(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.totalSpent is number && data.totalSpent >= 0 &&
+             data.orderCount is number && data.orderCount >= 0 &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isValidOrder(data) {
+      return data.customerId is string && data.customerName is string &&
+             data.items is list && data.items.size() >= 0 && data.items.size() < 50 &&
+             data.totalAmount is number && data.totalAmount >= 0 &&
+             data.status in ['pending', 'completed', 'cancelled'] &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isValidSettings(data) {
+      return data.notificationTemplate is string && data.notificationTemplate.size() < 2000 &&
+             data.priceMap is map;
+    }
+
+    function isValidMachine(data) {
+      return data.name is string && data.name.size() > 0 &&
+             data.defaultPrice is number && data.defaultPrice >= 0 &&
+             data.variants is list &&
+             isValidDateString(data.createdAt);
+    }
+
+    function isValidRelease(data) {
+      return data.orderId is string && data.itemId is string &&
+             data.customerName is string && data.machineName is string &&
+             (!('variant' in data) || data.variant is string) &&
+             data.quantity is number && data.quantity >= 0 &&
+             data.price is number && data.price >= 0 &&
+             data.status in ['pending', 'completed', 'cancelled'] &&
+             isValidDateString(data.createdAt);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+    match /customers/{customerId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin() && isValidCustomer(request.resource.data);
+      allow update: if isAdmin() && isValidCustomer(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /orders/{orderId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin() && isValidOrder(request.resource.data);
+      allow update: if isAdmin() && isValidOrder(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /settings/global {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin() && isValidSettings(request.resource.data);
+    }
+
+    match /machines/{machineId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin() && isValidMachine(request.resource.data);
+      allow update: if isAdmin() && isValidMachine(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /releases/{releaseId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin() && isValidRelease(request.resource.data);
+      allow update: if isAdmin() && isValidRelease(request.resource.data);
+      allow delete: if isAdmin();
+    }
+  }
+}

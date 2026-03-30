@@ -1,0 +1,114 @@
+{
+  "entities": {
+    "customers": {
+      "title": "Customer",
+      "description": "Represents a gachapon consumer.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Customer name" },
+        "phone": { "type": "string", "description": "Phone number" },
+        "lineId": { "type": "string", "description": "LINE ID" },
+        "fbName": { "type": "string", "description": "Facebook name" },
+        "totalSpent": { "type": "number", "description": "Total amount spent" },
+        "orderCount": { "type": "integer", "description": "Number of orders" },
+        "lastOrderAt": { "type": "string", "format": "date-time", "description": "Last order timestamp" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp" }
+      },
+      "required": ["name", "totalSpent", "orderCount", "createdAt"]
+    },
+    "orders": {
+      "title": "Order",
+      "description": "Represents a gachapon purchase.",
+      "type": "object",
+      "properties": {
+        "customerId": { "type": "string", "description": "Reference to customer ID" },
+        "customerName": { "type": "string", "description": "Snapshot of customer name" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "machineName": { "type": "string" },
+              "price": { "type": "number" },
+              "quantity": { "type": "integer" },
+              "variant": { "type": "string" },
+              "subtotal": { "type": "number" }
+            }
+          }
+        },
+        "totalAmount": { "type": "number", "description": "Total order amount" },
+        "status": { "type": "string", "enum": ["pending", "completed", "cancelled"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["customerId", "customerName", "items", "totalAmount", "status", "createdAt"]
+    },
+    "machines": {
+      "title": "Machine",
+      "description": "Represents a gachapon machine.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "defaultPrice": { "type": "number", "description": "Default price in TWD" },
+        "variants": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "defaultPrice", "variants", "createdAt"]
+    },
+    "releases": {
+      "title": "Release",
+      "description": "Represents a gachapon release from a customer.",
+      "type": "object",
+      "properties": {
+        "orderId": { "type": "string" },
+        "itemId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "machineName": { "type": "string" },
+        "variant": { "type": "string" },
+        "quantity": { "type": "integer" },
+        "price": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "completed", "cancelled"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["orderId", "itemId", "customerName", "machineName", "quantity", "price", "status", "createdAt"]
+    },
+    "settings": {
+      "title": "System Settings",
+      "description": "Global application settings.",
+      "type": "object",
+      "properties": {
+        "notificationTemplate": { "type": "string", "description": "Default notification text" },
+        "priceMap": { 
+          "type": "object", 
+          "additionalProperties": { "type": "number" },
+          "description": "JPY to TWD price mapping" 
+        },
+        "lastBackupAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["notificationTemplate", "priceMap"]
+    }
+  },
+  "firestore": {
+    "/customers/{customerId}": {
+      "schema": "customers",
+      "description": "Customer records"
+    },
+    "/orders/{orderId}": {
+      "schema": "orders",
+      "description": "Order records"
+    },
+    "/machines/{machineId}": {
+      "schema": "machines",
+      "description": "Machine records"
+    },
+    "/releases/{releaseId}": {
+      "schema": "releases",
+      "description": "Release records"
+    },
+    "/settings/global": {
+      "schema": "settings",
+      "description": "Global system settings"
+    }
+  }
+}

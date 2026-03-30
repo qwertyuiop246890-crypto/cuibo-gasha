@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: #FCF4E9;
+  --color-ink: #957E6B;
+  --color-primary-blue: #AEC8DB;
+  --color-card-white: #FFFFFF;
+  --color-divider: rgba(149, 126, 107, 0.2);
+  
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-tap-highlight-color: transparent;
+}
+
+@layer utilities {
+  .card-shadow {
+    box-shadow: 0 4px 20px rgba(149, 126, 107, 0.1);
+  }
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  body {
+    background: white !important;
+    color: black !important;
+  }
+}
