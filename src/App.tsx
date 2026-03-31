@@ -1083,6 +1083,63 @@ const MachineManagement = ({
     ...machines.map(m => m.name)
   ])).sort();
 
+  const autoInitializeUnsetMachines = async () => {
+    const unsetMachines = allMachineNames.filter(name => !machines.find(m => m.name === name));
+    if (unsetMachines.length === 0) {
+      showToast('沒有未設定的機台', 'success');
+      return;
+    }
+
+    setConfirmModal({
+      show: true,
+      title: '一鍵初始化未設定機台',
+      message: `將自動為 ${unsetMachines.length} 個未設定的機台建立預設資料（自動抓取訂單中的款式與金額）。確定要執行嗎？`,
+      onConfirm: async () => {
+        try {
+          const batch = writeBatch(db);
+          const now = new Date().toISOString();
+          let addedCount = 0;
+
+          unsetMachines.forEach(machineName => {
+            // Try to guess JPY price from last order
+            let guessedPrice = 0;
+            const lastOrderWithMachine = orders.find(o => o.items.some(i => i.machineName === machineName));
+            if (lastOrderWithMachine) {
+              const item = lastOrderWithMachine.items.find(i => i.machineName === machineName);
+              if (item) {
+                const ntPrice = item.price;
+                const map = settings?.priceMap || DEFAULT_PRICE_MAP;
+                const guessedJpy = Object.keys(map).find(k => map[parseInt(k)] === ntPrice) || 
+                                  Object.keys(map).find(k => map[parseInt(k)] === ntPrice - 10);
+                if (guessedJpy) guessedPrice = parseInt(guessedJpy);
+              }
+            }
+
+            // Extract variants
+            const variantsFromOrders = Array.from(new Set(
+              orders.flatMap(o => o.items.filter(i => i.machineName === machineName).map(i => i.variant || ''))
+            )).filter(v => v && !v.includes('(環保)'));
+
+            const newDocRef = doc(collection(db, 'machines'));
+            batch.set(newDocRef, {
+              name: machineName,
+              defaultPrice: guessedPrice,
+              variants: variantsFromOrders,
+              createdAt: now,
+              updatedAt: now
+            });
+            addedCount++;
+          });
+
+          await batch.commit();
+          showToast(`成功初始化 ${addedCount} 個機台！`);
+        } catch (err) {
+          handleFirestoreError(err, OperationType.WRITE, 'machines_batch_init');
+        }
+      }
+    });
+  };
+
   const saveMachine = async () => {
     if (!name || !price) {
       showToast('請填寫名稱與金額', 'error');
@@ -1318,6 +1375,17 @@ const MachineManagement = ({
             </button>
           )}
         </div>
+      </div>
+
+      <div className="flex justify-between items-center">
+        <h3 className="text-lg font-bold text-ink">機台列表</h3>
+        <button 
+          onClick={autoInitializeUnsetMachines}
+          className="px-4 py-2 bg-orange-500 text-white rounded-xl text-sm font-bold flex items-center gap-2 hover:bg-orange-600 transition-colors"
+        >
+          <RefreshCw className="w-4 h-4" />
+          一鍵初始化未設定
+        </button>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
