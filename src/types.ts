@@ -5,7 +5,7 @@ export interface Customer {
   lineId?: string;
   fbName?: string;
   totalSpent: number;
-  orderCount: number;
+  totalItems: number;
   lastOrderAt: string;
   createdAt: string;
 }
@@ -20,6 +20,7 @@ export interface OrderItem {
   subtotal: number;
   isReleased?: boolean;
   releaseQuantity?: number;
+  createdAt: string;
 }
 
 export interface Machine {

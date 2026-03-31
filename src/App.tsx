@@ -398,7 +398,7 @@ const CreateOrder = ({
         const newCust: Omit<Customer, 'id'> = {
           name: trimmedName,
           totalSpent: 0,
-          orderCount: 0,
+          totalItems: 0,
           createdAt: now,
           lastOrderAt: now
         };
@@ -435,7 +435,8 @@ const CreateOrder = ({
             price: itemPrice,
             quantity,
             variant: finalVariant,
-            subtotal
+            subtotal,
+            createdAt: now
           });
         }
 
@@ -456,7 +457,8 @@ const CreateOrder = ({
             price: itemPrice,
             quantity,
             variant: finalVariant,
-            subtotal
+            subtotal,
+            createdAt: now
           }],
           totalAmount: subtotal,
           status: 'pending',
@@ -469,7 +471,7 @@ const CreateOrder = ({
       // 3. Update customer stats
       await updateDoc(doc(db, 'customers', customerId!), {
         totalSpent: (customer?.totalSpent || 0) + subtotal,
-        orderCount: (customer?.orderCount || 0) + (existingOrder ? 0 : 1),
+        totalItems: (customer?.totalItems || 0) + quantity,
         lastOrderAt: now
       });
 
@@ -669,6 +671,9 @@ const OrdersList = ({
       const order = orders.find(o => o.id === orderId);
       if (!order) return;
 
+      const oldItem = order.items.find(i => i.id === updatedItem.id);
+      const qtyDiff = updatedItem.quantity - (oldItem?.quantity || 0);
+
       const newItems = order.items.map(i => i.id === updatedItem.id ? updatedItem : i);
       const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
 
@@ -678,12 +683,14 @@ const OrdersList = ({
         updatedAt: new Date().toISOString()
       });
       
-      // Update customer total spent
+      // Update customer total spent and total items
       const diff = newTotal - order.totalAmount;
       const customerSnap = await getDoc(doc(db, 'customers', order.customerId));
       if (customerSnap.exists()) {
+        const customerData = customerSnap.data() as Customer;
         await updateDoc(doc(db, 'customers', order.customerId), {
-          totalSpent: customerSnap.data().totalSpent + diff
+          totalSpent: customerData.totalSpent + diff,
+          totalItems: (customerData.totalItems || 0) + qtyDiff
         });
       }
 
@@ -745,7 +752,7 @@ const OrdersList = ({
                           const customerData = customerSnap.data() as Customer;
                           await updateDoc(doc(db, 'customers', order.customerId), {
                             totalSpent: Math.max(0, customerData.totalSpent - order.totalAmount),
-                            orderCount: Math.max(0, customerData.orderCount - 1)
+                            totalItems: Math.max(0, (customerData.totalItems || 0) - order.items.reduce((sum, i) => sum + i.quantity, 0))
                           });
                         }
 
@@ -775,7 +782,10 @@ const OrdersList = ({
                     <div className="w-8 h-8 bg-background rounded-lg flex items-center justify-center overflow-hidden flex-shrink-0">
                       <Package className="w-4 h-4 text-ink/20" />
                     </div>
-                    <span className="text-ink/70">{item.machineName} {item.variant && `(${item.variant})`}</span>
+                    <div className="flex flex-col">
+                      <span className="text-ink/70">{item.machineName} {item.variant && `(${item.variant})`}</span>
+                      <span className="text-[10px] text-ink/30">{formatDateTime(item.createdAt)}</span>
+                    </div>
                   </div>
                   <span className="font-medium text-ink/40">NT${item.price} x {item.quantity}</span>
                 </div>
@@ -866,7 +876,7 @@ const OrdersList = ({
                               const customerData = customerSnap.data() as Customer;
                               await updateDoc(doc(db, 'customers', order.customerId), {
                                 totalSpent: Math.max(0, customerData.totalSpent - editingItem.item.subtotal),
-                                orderCount: newItems.length === 0 ? Math.max(0, customerData.orderCount - 1) : customerData.orderCount
+                                totalItems: Math.max(0, (customerData.totalItems || 0) - editingItem.item.quantity)
                               });
                             }
                             
@@ -965,7 +975,7 @@ const CustomersList = ({
               </div>
               <div>
                 <h4 className="font-bold text-ink">{customer.name}</h4>
-                <p className="text-xs text-ink/40">共 {customer.orderCount} 筆訂單</p>
+                <p className="text-xs text-ink/40">共 {customer.totalItems} 顆</p>
               </div>
             </div>
             <div className="flex items-center gap-4">
@@ -1425,6 +1435,9 @@ const CustomerDetailView = ({
       const order = orders.find(o => o.id === orderId);
       if (!order) return;
 
+      const oldItem = order.items.find(i => i.id === updatedItem.id);
+      const qtyDiff = updatedItem.quantity - (oldItem?.quantity || 0);
+
       const newItems = order.items.map(i => i.id === updatedItem.id ? updatedItem : i);
       const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
 
@@ -1434,10 +1447,11 @@ const CustomerDetailView = ({
         updatedAt: new Date().toISOString()
       });
       
-      // Update customer total spent
+      // Update customer total spent and total items
       const diff = newTotal - order.totalAmount;
       await updateDoc(doc(db, 'customers', customer.id), {
-        totalSpent: customer.totalSpent + diff
+        totalSpent: customer.totalSpent + diff,
+        totalItems: (customer.totalItems || 0) + qtyDiff
       });
 
       setEditingItem(null);
@@ -1467,7 +1481,7 @@ const CustomerDetailView = ({
         const newCust = {
           name: trimmedTarget,
           totalSpent: 0,
-          orderCount: 0,
+          totalItems: 0,
           createdAt: new Date().toISOString(),
           lastOrderAt: new Date().toISOString()
         };
@@ -1488,32 +1502,53 @@ const CustomerDetailView = ({
         updatedAt: new Date().toISOString()
       });
       await updateDoc(doc(db, 'customers', customer.id), {
-        totalSpent: customer.totalSpent - item.subtotal
+        totalSpent: customer.totalSpent - item.subtotal,
+        totalItems: Math.max(0, customer.totalItems - item.quantity)
       });
 
       // 3. Add to target customer's pending order or create new
       const targetOrder = orders.find(o => o.customerId === targetId && o.status === 'pending');
+      const now = new Date().toISOString();
       if (targetOrder) {
-        const updatedItems = [...targetOrder.items, item];
+        const existingItemIdx = targetOrder.items.findIndex(i => 
+          i.machineName === item.machineName && 
+          (i.variant || '') === (item.variant || '') && 
+          i.price === item.price
+        );
+
+        let updatedItems;
+        if (existingItemIdx > -1) {
+          updatedItems = [...targetOrder.items];
+          const existingItem = updatedItems[existingItemIdx];
+          updatedItems[existingItemIdx] = {
+            ...existingItem,
+            quantity: existingItem.quantity + item.quantity,
+            subtotal: (existingItem.quantity + item.quantity) * existingItem.price,
+            createdAt: now
+          };
+        } else {
+          updatedItems = [...targetOrder.items, { ...item, id: crypto.randomUUID(), createdAt: now }];
+        }
+
         await updateDoc(doc(db, 'orders', targetOrder.id), {
           items: updatedItems,
           totalAmount: targetOrder.totalAmount + item.subtotal,
-          updatedAt: new Date().toISOString()
+          updatedAt: now
         });
       } else {
         await setDoc(doc(collection(db, 'orders')), {
           customerId: targetId,
           customerName: trimmedTarget,
-          items: [item],
+          items: [{ ...item, id: crypto.randomUUID(), createdAt: now }],
           totalAmount: item.subtotal,
           status: 'pending',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
+          createdAt: now,
+          updatedAt: now
         });
       }
       await updateDoc(doc(db, 'customers', targetId!), {
         totalSpent: targetCust.totalSpent + item.subtotal,
-        orderCount: targetCust.orderCount + (targetOrder ? 0 : 1),
+        totalItems: targetCust.totalItems + item.quantity,
         lastOrderAt: new Date().toISOString()
       });
 
@@ -1563,7 +1598,7 @@ const CustomerDetailView = ({
           </button>
           <div>
             <h2 className="text-xl font-bold text-ink">{customer.name}</h2>
-            <p className="text-xs text-ink/40">消費總額: NT${customer.totalSpent} • 訂單數: {customer.orderCount}</p>
+            <p className="text-xs text-ink/40">消費總額: NT${customer.totalSpent} • 總顆數: {customer.totalItems}</p>
           </div>
         </div>
         <button 
@@ -1596,7 +1631,7 @@ const CustomerDetailView = ({
                           const customerData = customerSnap.data() as Customer;
                           await updateDoc(doc(db, 'customers', order.customerId), {
                             totalSpent: Math.max(0, customerData.totalSpent - order.totalAmount),
-                            orderCount: Math.max(0, customerData.orderCount - 1)
+                            totalItems: Math.max(0, (customerData.totalItems || 0) - order.items.reduce((sum, i) => sum + i.quantity, 0))
                           });
                         }
 
@@ -1625,7 +1660,11 @@ const CustomerDetailView = ({
                         </div>
                         <div>
                           <p className="font-bold text-ink">{item.machineName}</p>
-                          <p className="text-xs text-ink/40">{item.variant || '無款式'}</p>
+                          <div className="flex items-center gap-2">
+                            <p className="text-xs text-ink/40">{item.variant || '無款式'}</p>
+                            <span className="text-[10px] text-ink/20">•</span>
+                            <p className="text-[10px] text-ink/30">{formatDateTime(item.createdAt)}</p>
+                          </div>
                         </div>
                       </div>
                       <div className="text-right">
@@ -1745,7 +1784,7 @@ const CustomerDetailView = ({
                               const customerData = customerSnap.data() as Customer;
                               await updateDoc(doc(db, 'customers', order.customerId), {
                                 totalSpent: Math.max(0, customerData.totalSpent - editingItem.item.subtotal),
-                                orderCount: newItems.length === 0 ? Math.max(0, customerData.orderCount - 1) : customerData.orderCount
+                                totalItems: Math.max(0, (customerData.totalItems || 0) - editingItem.item.quantity)
                               });
                             }
                             
@@ -1866,11 +1905,16 @@ const PrintPreview = ({
               @media print {
                 @page {
                   size: A4;
-                  margin: 15mm;
+                  margin: 10mm;
+                }
+                body {
+                  -webkit-print-color-adjust: exact;
                 }
                 .customer-section {
                   break-inside: avoid;
-                  margin-bottom: 4rem;
+                  margin-bottom: 2rem;
+                  padding-bottom: 2rem;
+                  border-bottom: 1px dashed #ccc;
                 }
                 .customer-section.long-order {
                   break-inside: auto;
@@ -1882,66 +1926,69 @@ const PrintPreview = ({
                 thead {
                   display: table-header-group;
                 }
-                tfoot {
-                  display: table-footer-group;
-                }
                 tr {
                   break-inside: avoid;
-                  break-after: auto;
+                }
+                .print-header {
+                  display: table-header-group;
                 }
               }
             `}</style>
-            <div className="space-y-12 print:space-y-0">
+            <div className="space-y-8 print:space-y-0">
               {customers.filter(c => selectedIds.includes(c.id)).map(customer => {
                 const custOrders = orders.filter(o => o.customerId === customer.id);
                 const allItems = custOrders.flatMap(o => o.items);
-                const isLongOrder = allItems.length > 15;
+                const isLongOrder = allItems.length > 12;
 
                 return (
                   <div 
                     key={customer.id} 
                     className={cn(
-                      "customer-section border-b-2 border-divider pb-8 last:border-none print:border-ink print:pb-12",
+                      "customer-section last:border-none print:pb-8",
                       isLongOrder && "long-order"
                     )}
                   >
                     <table className="w-full text-left">
                       <thead>
-                        <tr>
-                          <th colSpan={5} className="pb-8">
-                            <div className="text-center">
-                              <h1 className="text-3xl font-bold text-ink border-b-4 border-ink pb-2 inline-block">
+                        <tr className="print-header">
+                          <th colSpan={5} className="pb-4">
+                            <div className="text-center border-b-2 border-ink pb-4 mb-4">
+                              <h1 className="text-2xl font-bold text-ink">
                                 {customer.name} 扭蛋訂單明細
                               </h1>
-                              <p className="text-xs font-bold text-ink/60 mt-2">
-                                列印日期：{format(toZonedTime(new Date(), TAIWAN_TZ), 'yyyy/MM/dd')}
-                              </p>
+                              <div className="flex justify-between items-center mt-2 text-[10px] font-bold text-ink/60">
+                                <span>列印日期：{format(toZonedTime(new Date(), TAIWAN_TZ), 'yyyy/MM/dd')}</span>
+                                <span>顧客：{customer.name}</span>
+                              </div>
                             </div>
                           </th>
                         </tr>
-                        <tr className="border-b-2 border-ink text-sm">
-                          <th className="py-2">機台名稱</th>
-                          <th className="py-2">款式</th>
-                          <th className="py-2">單價</th>
-                          <th className="py-2">數量</th>
-                          <th className="py-2 text-right">小計</th>
+                        <tr className="border-b-2 border-ink text-sm bg-ink/5 print:bg-transparent">
+                          <th className="py-2 px-2">機台名稱</th>
+                          <th className="py-2 px-2">款式</th>
+                          <th className="py-2 px-2">單價</th>
+                          <th className="py-2 px-2">數量</th>
+                          <th className="py-2 px-2 text-right">小計</th>
                         </tr>
                       </thead>
                       <tbody>
                         {allItems.map((item, idx) => (
-                          <tr key={idx} className="border-b border-divider text-sm print:border-ink/20">
-                            <td className="py-3">{item.machineName}</td>
-                            <td className="py-3">{item.variant || '-'}</td>
-                            <td className="py-3">NT${item.price}</td>
-                            <td className="py-3">{item.quantity}</td>
-                            <td className="py-3 text-right font-bold">NT${item.subtotal}</td>
+                          <tr key={idx} className="border-b border-divider text-sm print:border-ink/10">
+                            <td className="py-2 px-2">
+                              <div className="font-medium">{item.machineName}</div>
+                              <div className="text-[10px] text-ink/30 print:text-ink/50">{formatDateTime(item.createdAt)}</div>
+                            </td>
+                            <td className="py-2 px-2">{item.variant || '-'}</td>
+                            <td className="py-2 px-2">NT${item.price}</td>
+                            <td className="py-2 px-2">{item.quantity}</td>
+                            <td className="py-2 px-2 text-right font-bold">NT${item.subtotal}</td>
                           </tr>
                         ))}
                       </tbody>
                       <tfoot>
                         <tr>
-                          <td colSpan={4} className="py-6 text-right font-bold text-lg">總計金額：</td>
-                          <td className="py-6 text-right font-bold text-2xl text-primary-blue print:text-ink">NT${customer.totalSpent}</td>
+                          <td colSpan={4} className="py-4 text-right font-bold text-sm">總計金額：</td>
+                          <td className="py-4 text-right font-bold text-xl text-primary-blue print:text-ink">NT${customer.totalSpent}</td>
                         </tr>
                       </tfoot>
                     </table>
@@ -1996,7 +2043,7 @@ const Dashboard = ({
         const newCust = {
           name: trimmedTarget,
           totalSpent: 0,
-          orderCount: 0,
+          totalItems: 0,
           createdAt: new Date().toISOString(),
           lastOrderAt: new Date().toISOString()
         };
@@ -2033,14 +2080,6 @@ const Dashboard = ({
         
         if (updatedItems.length === 0) {
           await deleteDoc(orderRef);
-          
-          // Update original customer's orderCount
-          const originalCustomer = customers.find(c => c.id === orderData.customerId);
-          if (originalCustomer) {
-            await updateDoc(doc(db, 'customers', originalCustomer.id), {
-              orderCount: Math.max(0, originalCustomer.orderCount - 1)
-            });
-          }
         } else {
           await updateDoc(orderRef, {
             items: updatedItems,
@@ -2049,11 +2088,12 @@ const Dashboard = ({
           });
         }
 
-        // Update original customer's totalSpent
+        // Update original customer's totalSpent and totalItems
         const originalCustomer = customers.find(c => c.id === orderData.customerId);
         if (originalCustomer && itemToTransfer) {
           await updateDoc(doc(db, 'customers', originalCustomer.id), {
-            totalSpent: Math.max(0, originalCustomer.totalSpent - itemToTransfer.subtotal)
+            totalSpent: Math.max(0, originalCustomer.totalSpent - itemToTransfer.subtotal),
+            totalItems: Math.max(0, originalCustomer.totalItems - itemToTransfer.quantity)
           });
         }
       }
@@ -2067,26 +2107,47 @@ const Dashboard = ({
         };
 
         const targetOrder = orders.find(o => o.customerId === targetId && o.status === 'pending');
+        const now = new Date().toISOString();
         if (targetOrder) {
-          const updatedItems = [...targetOrder.items, transferredItem];
+          const existingItemIdx = targetOrder.items.findIndex(i => 
+            i.machineName === transferredItem.machineName && 
+            (i.variant || '') === (transferredItem.variant || '') && 
+            i.price === transferredItem.price
+          );
+
+          let updatedItems;
+          if (existingItemIdx > -1) {
+            updatedItems = [...targetOrder.items];
+            const existingItem = updatedItems[existingItemIdx];
+            updatedItems[existingItemIdx] = {
+              ...existingItem,
+              quantity: existingItem.quantity + transferredItem.quantity,
+              subtotal: (existingItem.quantity + transferredItem.quantity) * existingItem.price,
+              createdAt: now
+            };
+          } else {
+            updatedItems = [...targetOrder.items, { ...transferredItem, createdAt: now }];
+          }
+
           await updateDoc(doc(db, 'orders', targetOrder.id), {
             items: updatedItems,
             totalAmount: targetOrder.totalAmount + transferredItem.subtotal,
-            updatedAt: new Date().toISOString()
+            updatedAt: now
           });
         } else {
           await setDoc(doc(collection(db, 'orders')), {
             customerId: targetId,
             customerName: trimmedTarget,
-            items: [transferredItem],
+            items: [{ ...transferredItem, createdAt: now }],
             totalAmount: transferredItem.subtotal,
             status: 'pending',
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
+            createdAt: now,
+            updatedAt: now
           });
         }
         await updateDoc(doc(db, 'customers', targetId!), {
           totalSpent: targetCust.totalSpent + transferredItem.subtotal,
+          totalItems: targetCust.totalItems + transferredItem.quantity,
           lastOrderAt: new Date().toISOString()
         });
       }
@@ -2134,7 +2195,7 @@ const Dashboard = ({
                       {r.variant && <span className="text-[10px] bg-ink/5 px-1.5 py-0.5 rounded text-ink/60">{r.variant}</span>}
                     </div>
                     <p className="text-xs text-ink/40">
-                      來自 <span className="font-bold text-ink/60">{r.customerName}</span> • {r.quantity} 顆 • NT${r.price}/顆
+                      來自 <span className="font-bold text-ink/60">{r.customerName}</span> • {r.quantity} 顆 • NT${r.price}/顆 • {formatDateTime(r.createdAt)}
                     </p>
                   </div>
                   <button 
@@ -2394,6 +2455,12 @@ const SettingsView = ({
 };
 
 // --- Main App ---
+
+const formatDateTime = (dateStr?: string) => {
+  if (!dateStr) return '未知時間';
+  const date = new Date(dateStr);
+  return `${date.getMonth() + 1}/${date.getDate()} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+};
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -2820,7 +2887,10 @@ ${settings.notificationTemplate}`;
                   <tbody>
                     {selectedOrder.items.map((item, idx) => (
                       <tr key={idx} className="border-b border-gray-200">
-                        <td className="py-2">{item.machineName} {item.variant && `(${item.variant})`}</td>
+                        <td className="py-2">
+                          <div>{item.machineName} {item.variant && `(${item.variant})`}</div>
+                          <div className="text-[10px] text-gray-400">{formatDateTime(item.createdAt)}</div>
+                        </td>
                         <td className="text-center py-2">{item.quantity}</td>
                         <td className="text-right py-2">NT${item.subtotal}</td>
                       </tr>
