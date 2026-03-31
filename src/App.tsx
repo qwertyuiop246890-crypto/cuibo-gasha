@@ -13,7 +13,7 @@ import {
 import { 
   collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, 
   query, orderBy, serverTimestamp, getDoc, getDocs, writeBatch,
-  getDocFromServer
+  getDocFromServer, increment
 } from 'firebase/firestore';
 import { useReactToPrint } from 'react-to-print';
 import { format } from 'date-fns';
@@ -470,8 +470,8 @@ const CreateOrder = ({
       
       // 3. Update customer stats
       await updateDoc(doc(db, 'customers', customerId!), {
-        totalSpent: (customer?.totalSpent || 0) + subtotal,
-        totalItems: (customer?.totalItems || 0) + quantity,
+        totalSpent: increment(subtotal),
+        totalItems: increment(quantity),
         lastOrderAt: now
       });
 
@@ -685,14 +685,10 @@ const OrdersList = ({
       
       // Update customer total spent and total items
       const diff = newTotal - order.totalAmount;
-      const customerSnap = await getDoc(doc(db, 'customers', order.customerId));
-      if (customerSnap.exists()) {
-        const customerData = customerSnap.data() as Customer;
-        await updateDoc(doc(db, 'customers', order.customerId), {
-          totalSpent: customerData.totalSpent + diff,
-          totalItems: (customerData.totalItems || 0) + qtyDiff
-        });
-      }
+      await updateDoc(doc(db, 'customers', order.customerId), {
+        totalSpent: increment(diff),
+        totalItems: increment(qtyDiff)
+      });
 
       setEditingItem(null);
       showToast('更新成功');
@@ -729,7 +725,11 @@ const OrdersList = ({
           <div className="flex items-center justify-between mb-4">
             <div>
               <h4 className="font-bold text-lg text-ink">{order.customerName}</h4>
-              <p className="text-xs text-ink/40">{order.createdAt ? format(toZonedTime(new Date(order.createdAt), TAIWAN_TZ), 'yyyy/MM/dd HH:mm') : '無日期'}</p>
+              <div className="flex items-center gap-2">
+                <p className="text-xs text-ink/40">{order.createdAt ? format(toZonedTime(new Date(order.createdAt), TAIWAN_TZ), 'yyyy/MM/dd HH:mm') : '無日期'}</p>
+                <span className="text-[10px] text-ink/20">•</span>
+                <p className="text-xs text-ink/40">共 {order.items.reduce((sum, i) => sum + i.quantity, 0)} 顆</p>
+              </div>
             </div>
             <div className="flex items-center gap-3">
               <div className="text-right">
@@ -747,14 +747,10 @@ const OrdersList = ({
                         await deleteDoc(doc(db, 'orders', order.id));
                         
                         // Update customer stats
-                        const customerSnap = await getDoc(doc(db, 'customers', order.customerId));
-                        if (customerSnap.exists()) {
-                          const customerData = customerSnap.data() as Customer;
-                          await updateDoc(doc(db, 'customers', order.customerId), {
-                            totalSpent: Math.max(0, customerData.totalSpent - order.totalAmount),
-                            totalItems: Math.max(0, (customerData.totalItems || 0) - order.items.reduce((sum, i) => sum + i.quantity, 0))
-                          });
-                        }
+                        await updateDoc(doc(db, 'customers', order.customerId), {
+                          totalSpent: increment(-order.totalAmount),
+                          totalItems: increment(-order.items.reduce((sum, i) => sum + i.quantity, 0))
+                        });
 
                         showToast('訂單已刪除');
                       } catch (err) {
@@ -871,14 +867,10 @@ const OrdersList = ({
                             }
                             
                             // Update customer stats
-                            const customerSnap = await getDoc(doc(db, 'customers', order.customerId));
-                            if (customerSnap.exists()) {
-                              const customerData = customerSnap.data() as Customer;
-                              await updateDoc(doc(db, 'customers', order.customerId), {
-                                totalSpent: Math.max(0, customerData.totalSpent - editingItem.item.subtotal),
-                                totalItems: Math.max(0, (customerData.totalItems || 0) - editingItem.item.quantity)
-                              });
-                            }
+                            await updateDoc(doc(db, 'customers', order.customerId), {
+                              totalSpent: increment(-editingItem.item.subtotal),
+                              totalItems: increment(-editingItem.item.quantity)
+                            });
                             
                             setEditingItem(null);
                             showToast('項目已刪除');
@@ -908,16 +900,38 @@ const CustomersList = ({
   setConfirmModal,
   showToast,
   onSelectCustomer,
-  onCopyNotification
+  onCopyNotification,
+  orders
 }: { 
   customers: Customer[],
   setConfirmModal: (m: any) => void,
   showToast: (m: string, t?: 'success' | 'error') => void,
   onSelectCustomer: (c: Customer) => void,
-  onCopyNotification: (c: Customer) => void
+  onCopyNotification: (c: Customer) => void,
+  orders: Order[]
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [sortBy, setSortBy] = useState<'name' | 'spent'>('spent');
+
+  const handleSyncAllStats = async () => {
+    try {
+      const batch = writeBatch(db);
+      customers.forEach(customer => {
+        const custOrders = orders.filter(o => o.customerId === customer.id);
+        const actualTotalSpent = custOrders.reduce((sum, o) => sum + o.totalAmount, 0);
+        const actualTotalItems = custOrders.reduce((sum, o) => sum + o.items.reduce((s, i) => s + i.quantity, 0), 0);
+        
+        batch.update(doc(db, 'customers', customer.id), {
+          totalSpent: actualTotalSpent,
+          totalItems: actualTotalItems
+        });
+      });
+      await batch.commit();
+      showToast('所有顧客數據已同步');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'customers_sync');
+    }
+  };
 
   const sortedCustomers = [...customers]
     .filter(c => c.name.toLowerCase().includes(searchTerm.toLowerCase()))
@@ -940,25 +954,34 @@ const CustomersList = ({
             onChange={(e) => setSearchTerm(e.target.value)}
           />
         </div>
-        <div className="flex bg-card-white p-1 rounded-2xl card-shadow">
+        <div className="flex items-center gap-2">
           <button 
-            onClick={() => setSortBy('spent')}
-            className={cn(
-              "px-4 py-2 rounded-xl text-xs font-bold transition-all",
-              sortBy === 'spent' ? "bg-ink text-white" : "text-ink/40"
-            )}
+            onClick={handleSyncAllStats}
+            className="p-4 bg-card-white text-primary-blue rounded-2xl card-shadow hover:bg-primary-blue/5 transition-colors"
+            title="同步所有顧客數據"
           >
-            金額排序
+            <RefreshCw className="w-5 h-5" />
           </button>
-          <button 
-            onClick={() => setSortBy('name')}
-            className={cn(
-              "px-4 py-2 rounded-xl text-xs font-bold transition-all",
-              sortBy === 'name' ? "bg-ink text-white" : "text-ink/40"
-            )}
-          >
-            名稱排序
-          </button>
+          <div className="flex bg-card-white p-1 rounded-2xl card-shadow">
+            <button 
+              onClick={() => setSortBy('spent')}
+              className={cn(
+                "px-4 py-2 rounded-xl text-xs font-bold transition-all",
+                sortBy === 'spent' ? "bg-ink text-white" : "text-ink/40"
+              )}
+            >
+              金額排序
+            </button>
+            <button 
+              onClick={() => setSortBy('name')}
+              className={cn(
+                "px-4 py-2 rounded-xl text-xs font-bold transition-all",
+                sortBy === 'name' ? "bg-ink text-white" : "text-ink/40"
+              )}
+            >
+              名稱排序
+            </button>
+          </div>
         </div>
       </div>
 
@@ -975,7 +998,7 @@ const CustomersList = ({
               </div>
               <div>
                 <h4 className="font-bold text-ink">{customer.name}</h4>
-                <p className="text-xs text-ink/40">共 {customer.totalItems} 顆</p>
+                <p className="text-xs text-ink/40">共 {customer.totalItems || 0} 顆</p>
               </div>
             </div>
             <div className="flex items-center gap-4">
@@ -1139,12 +1162,9 @@ const MachineManagement = ({
 
       // Update customers
       Object.entries(customerDiffs).forEach(([customerId, diff]) => {
-        const customer = customers.find(c => c.id === customerId);
-        if (customer) {
-          batch.update(doc(db, 'customers', customerId), {
-            totalSpent: customer.totalSpent + diff
-          });
-        }
+        batch.update(doc(db, 'customers', customerId), {
+          totalSpent: increment(diff)
+        });
       });
 
       await batch.commit();
@@ -1430,6 +1450,28 @@ const CustomerDetailView = ({
   const [transferringItem, setTransferringItem] = useState<{ orderId: string, item: OrderItem } | null>(null);
   const [targetCustomerName, setTargetCustomerName] = useState('');
 
+  const handleRecalculateStats = async () => {
+    try {
+      const actualTotalSpent = customerOrders.reduce((sum, o) => sum + o.totalAmount, 0);
+      const actualTotalItems = customerOrders.reduce((sum, o) => sum + o.items.reduce((s, i) => s + i.quantity, 0), 0);
+      
+      await updateDoc(doc(db, 'customers', customer.id), {
+        totalSpent: actualTotalSpent,
+        totalItems: actualTotalItems
+      });
+      showToast('數據已重新計算並同步');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `customers/${customer.id}`);
+    }
+  };
+
+  useEffect(() => {
+    // Auto-sync if stats look wrong (e.g. 0 items but has orders)
+    if (customer.totalItems === 0 && customerOrders.length > 0) {
+      handleRecalculateStats();
+    }
+  }, [customer.id, customer.totalItems, customerOrders.length]);
+
   const handleUpdateItem = async (orderId: string, updatedItem: OrderItem) => {
     try {
       const order = orders.find(o => o.id === orderId);
@@ -1450,8 +1492,8 @@ const CustomerDetailView = ({
       // Update customer total spent and total items
       const diff = newTotal - order.totalAmount;
       await updateDoc(doc(db, 'customers', customer.id), {
-        totalSpent: customer.totalSpent + diff,
-        totalItems: (customer.totalItems || 0) + qtyDiff
+        totalSpent: increment(diff),
+        totalItems: increment(qtyDiff)
       });
 
       setEditingItem(null);
@@ -1502,8 +1544,8 @@ const CustomerDetailView = ({
         updatedAt: new Date().toISOString()
       });
       await updateDoc(doc(db, 'customers', customer.id), {
-        totalSpent: customer.totalSpent - item.subtotal,
-        totalItems: Math.max(0, customer.totalItems - item.quantity)
+        totalSpent: increment(-item.subtotal),
+        totalItems: increment(-item.quantity)
       });
 
       // 3. Add to target customer's pending order or create new
@@ -1547,8 +1589,8 @@ const CustomerDetailView = ({
         });
       }
       await updateDoc(doc(db, 'customers', targetId!), {
-        totalSpent: targetCust.totalSpent + item.subtotal,
-        totalItems: targetCust.totalItems + item.quantity,
+        totalSpent: increment(item.subtotal),
+        totalItems: increment(item.quantity),
         lastOrderAt: new Date().toISOString()
       });
 
@@ -1598,7 +1640,16 @@ const CustomerDetailView = ({
           </button>
           <div>
             <h2 className="text-xl font-bold text-ink">{customer.name}</h2>
-            <p className="text-xs text-ink/40">消費總額: NT${customer.totalSpent} • 總顆數: {customer.totalItems}</p>
+            <div className="flex items-center gap-2">
+              <p className="text-xs text-ink/40">消費總額: NT${customer.totalSpent} • 總顆數: {customer.totalItems || 0}</p>
+              <button 
+                onClick={handleRecalculateStats}
+                className="p-1 text-primary-blue/60 hover:text-primary-blue transition-colors"
+                title="重新計算數據"
+              >
+                <RefreshCw className="w-3 h-3" />
+              </button>
+            </div>
           </div>
         </div>
         <button 
@@ -1626,14 +1677,10 @@ const CustomerDetailView = ({
                         await deleteDoc(doc(db, 'orders', order.id));
                         
                         // Update customer stats
-                        const customerSnap = await getDoc(doc(db, 'customers', order.customerId));
-                        if (customerSnap.exists()) {
-                          const customerData = customerSnap.data() as Customer;
-                          await updateDoc(doc(db, 'customers', order.customerId), {
-                            totalSpent: Math.max(0, customerData.totalSpent - order.totalAmount),
-                            totalItems: Math.max(0, (customerData.totalItems || 0) - order.items.reduce((sum, i) => sum + i.quantity, 0))
-                          });
-                        }
+                        await updateDoc(doc(db, 'customers', order.customerId), {
+                          totalSpent: increment(-order.totalAmount),
+                          totalItems: increment(-order.items.reduce((sum, i) => sum + i.quantity, 0))
+                        });
 
                         showToast('訂單已刪除');
                       } catch (err) {
@@ -1779,14 +1826,10 @@ const CustomerDetailView = ({
                             }
                             
                             // Update customer stats
-                            const customerSnap = await getDoc(doc(db, 'customers', order.customerId));
-                            if (customerSnap.exists()) {
-                              const customerData = customerSnap.data() as Customer;
-                              await updateDoc(doc(db, 'customers', order.customerId), {
-                                totalSpent: Math.max(0, customerData.totalSpent - editingItem.item.subtotal),
-                                totalItems: Math.max(0, (customerData.totalItems || 0) - editingItem.item.quantity)
-                              });
-                            }
+                            await updateDoc(doc(db, 'customers', order.customerId), {
+                              totalSpent: increment(-editingItem.item.subtotal),
+                              totalItems: increment(-editingItem.item.quantity)
+                            });
                             
                             setEditingItem(null);
                             showToast('項目已刪除');
@@ -2089,11 +2132,10 @@ const Dashboard = ({
         }
 
         // Update original customer's totalSpent and totalItems
-        const originalCustomer = customers.find(c => c.id === orderData.customerId);
-        if (originalCustomer && itemToTransfer) {
-          await updateDoc(doc(db, 'customers', originalCustomer.id), {
-            totalSpent: Math.max(0, originalCustomer.totalSpent - itemToTransfer.subtotal),
-            totalItems: Math.max(0, originalCustomer.totalItems - itemToTransfer.quantity)
+        if (itemToTransfer) {
+          await updateDoc(doc(db, 'customers', orderData.customerId), {
+            totalSpent: increment(-itemToTransfer.subtotal),
+            totalItems: increment(-itemToTransfer.quantity)
           });
         }
       }
@@ -2146,8 +2188,8 @@ const Dashboard = ({
           });
         }
         await updateDoc(doc(db, 'customers', targetId!), {
-          totalSpent: targetCust.totalSpent + transferredItem.subtotal,
-          totalItems: targetCust.totalItems + transferredItem.quantity,
+          totalSpent: increment(transferredItem.subtotal),
+          totalItems: increment(transferredItem.quantity),
           lastOrderAt: new Date().toISOString()
         });
       }
@@ -2181,7 +2223,10 @@ const Dashboard = ({
         <div className="bg-card-white p-6 rounded-3xl card-shadow">
           <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest mb-6 flex items-center justify-between">
             <span>釋出池</span>
-            <span className="bg-primary-blue/10 text-primary-blue px-2 py-1 rounded text-[10px]">{pendingReleases.length} 筆待處理</span>
+            <div className="flex items-center gap-2">
+              <span className="bg-primary-blue/10 text-primary-blue px-2 py-1 rounded text-[10px]">{pendingReleases.length} 筆待處理</span>
+              <span className="bg-orange-500/10 text-orange-500 px-2 py-1 rounded text-[10px]">共 {pendingReleases.reduce((sum, r) => sum + r.quantity, 0)} 顆</span>
+            </div>
           </h3>
           <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2">
             {pendingReleases.length === 0 ? (
@@ -2498,6 +2543,13 @@ export default function App() {
   });
   const printRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => {
+    if (selectedCustomer) {
+      const updated = customers.find(c => c.id === selectedCustomer.id);
+      if (updated) setSelectedCustomer(updated);
+    }
+  }, [customers]);
+
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     setToast({ show: true, message, type });
     setTimeout(() => setToast(t => ({ ...t, show: false })), 3000);
@@ -2740,6 +2792,7 @@ ${settings.notificationTemplate}`;
                   showToast={showToast}
                   onSelectCustomer={setSelectedCustomer}
                   onCopyNotification={copyCustomerNotification}
+                  orders={orders}
                 />
               )}
               {activeTab === 'machines' && (
