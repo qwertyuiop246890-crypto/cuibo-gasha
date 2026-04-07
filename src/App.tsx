@@ -10,6 +10,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { 
   signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut, User
 } from 'firebase/auth';
+import { GoogleGenAI, Type } from '@google/genai';
 import { 
   collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, 
   query, orderBy, serverTimestamp, getDoc, getDocs, writeBatch,
@@ -350,9 +351,108 @@ const CreateOrder = ({
   const [customerName, setCustomerName] = useState('');
   const [machineName, setMachineName] = useState('');
   const [price, setPrice] = useState<number>(100);
-  const [quantity, setQuantity] = useState(1);
-  const [variant, setVariant] = useState('');
-  const [isEco, setIsEco] = useState(false);
+  const [orderItems, setOrderItems] = useState([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const processImage = async (file: File) => {
+    setIsAnalyzing(true);
+    showToast('正在分析圖片...', 'success');
+
+    try {
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        const base64String = (reader.result as string).split(',')[1];
+        
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const response = await ai.models.generateContent({
+          model: "gemini-3-flash-preview",
+          contents: [
+            {
+              inlineData: {
+                data: base64String,
+                mimeType: file.type
+              }
+            },
+            "Analyze this image of a gachapon (capsule toy) or its promotional material. Extract the following information and return it as a JSON object: 'machineName' (string, the name of the gachapon series/machine), 'variants' (array of strings, the specific characters or variants shown, if applicable), 'price' (number, the price in JPY or NTD, just the number). If you cannot find a specific field, leave it empty or 0. Translate names to Traditional Chinese if possible."
+          ],
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                machineName: { type: Type.STRING },
+                variants: { 
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING }
+                },
+                price: { type: Type.NUMBER }
+              }
+            }
+          }
+        });
+
+        if (response.text) {
+          const result = JSON.parse(response.text);
+          if (result.machineName) setMachineName(result.machineName);
+          if (result.variants && result.variants.length > 0) {
+            setOrderItems(result.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
+          } else if (result.variant) {
+            setOrderItems([{ id: crypto.randomUUID(), variant: result.variant, quantity: 1, isEco: false }]);
+          }
+          if (result.price) {
+            // Try to map JPY to NTD if it looks like JPY (e.g., 300, 400, 500)
+            const map = settings?.priceMap || DEFAULT_PRICE_MAP;
+            if (map[result.price]) {
+               setPrice(result.price); // Set JPY price directly, the submitOrder handles the conversion
+            } else {
+               // If it's already NTD or unknown, we might just set it as JPY price and let user adjust, or find closest.
+               // Let's just set it to the raw number and let the user adjust if needed.
+               // Actually, the price state is the JPY price (e.g. 300, 400).
+               // If the AI returns 300, it sets price to 300.
+               setPrice(result.price);
+            }
+          }
+          showToast('圖片分析完成！', 'success');
+        }
+        setIsAnalyzing(false);
+      };
+      reader.readAsDataURL(file);
+    } catch (err) {
+      console.error(err);
+      showToast('圖片分析失敗，請稍後再試', 'error');
+      setIsAnalyzing(false);
+    }
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      await processImage(file);
+    }
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  useEffect(() => {
+    const handlePaste = async (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          const file = items[i].getAsFile();
+          if (file) {
+            e.preventDefault();
+            await processImage(file);
+            break;
+          }
+        }
+      }
+    };
+
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, [settings]);
 
   // Auto-fill price and variants when machine name changes
   useEffect(() => {
@@ -384,9 +484,6 @@ const CreateOrder = ({
     }
     
     const now = new Date().toISOString();
-    const itemPrice = (settings?.priceMap?.[price] || DEFAULT_PRICE_MAP[price] || 0) + (isEco ? 10 : 0);
-    const subtotal = itemPrice * quantity;
-    const finalVariant = variant + (isEco ? ' (環保)' : '');
     
     try {
       // 1. Find or Create Customer
@@ -410,39 +507,59 @@ const CreateOrder = ({
       // 2. Find existing pending order for this customer to consolidate
       const existingOrder = orders.find(o => o.customerId === customerId && o.status === 'pending');
       
-      if (existingOrder) {
-        // Check if same item exists in this order
-        const existingItemIdx = existingOrder.items.findIndex(i => 
+      let updatedItems = existingOrder ? [...existingOrder.items] : [];
+      let totalAddedAmount = 0;
+      let totalAddedQuantity = 0;
+      const newVariantsToSave = new Set<string>();
+
+      for (const orderItem of orderItems) {
+        if (orderItem.quantity <= 0) continue;
+        
+        const itemPrice = (settings?.priceMap?.[price] || DEFAULT_PRICE_MAP[price] || 0) + (orderItem.isEco ? 10 : 0);
+        const subtotal = itemPrice * orderItem.quantity;
+        const finalVariant = orderItem.variant + (orderItem.isEco ? ' (環保)' : '');
+        
+        totalAddedAmount += subtotal;
+        totalAddedQuantity += orderItem.quantity;
+        if (orderItem.variant.trim()) {
+          newVariantsToSave.add(orderItem.variant.trim());
+        }
+
+        const existingItemIdx = updatedItems.findIndex(i => 
           i.machineName === machineName && 
           (i.variant || '') === finalVariant && 
           i.price === itemPrice
         );
 
-        let updatedItems = [...existingOrder.items];
         if (existingItemIdx > -1) {
-          // Consolidate
           const item = updatedItems[existingItemIdx];
           updatedItems[existingItemIdx] = {
             ...item,
-            quantity: item.quantity + quantity,
+            quantity: item.quantity + orderItem.quantity,
             subtotal: item.subtotal + subtotal
           };
         } else {
-          // Add new item
           updatedItems.push({
             id: Math.random().toString(36).substr(2, 9),
             machineName,
             price: itemPrice,
-            quantity,
+            quantity: orderItem.quantity,
             variant: finalVariant,
             subtotal,
             createdAt: now
           });
         }
+      }
 
+      if (totalAddedQuantity === 0) {
+        showToast('請至少輸入一個數量大於0的項目', 'error');
+        return;
+      }
+
+      if (existingOrder) {
         await updateDoc(doc(db, 'orders', existingOrder.id), {
           items: updatedItems,
-          totalAmount: existingOrder.totalAmount + subtotal,
+          totalAmount: existingOrder.totalAmount + totalAddedAmount,
           updatedAt: now
         });
       } else {
@@ -451,16 +568,8 @@ const CreateOrder = ({
         const newOrder: Omit<Order, 'id'> = {
           customerId: customerId!,
           customerName: trimmedName,
-          items: [{
-            id: Math.random().toString(36).substr(2, 9),
-            machineName,
-            price: itemPrice,
-            quantity,
-            variant: finalVariant,
-            subtotal,
-            createdAt: now
-          }],
-          totalAmount: subtotal,
+          items: updatedItems,
+          totalAmount: totalAddedAmount,
           status: 'pending',
           createdAt: now,
           updatedAt: now
@@ -470,18 +579,18 @@ const CreateOrder = ({
       
       // 3. Update customer stats
       await updateDoc(doc(db, 'customers', customerId!), {
-        totalSpent: increment(subtotal),
-        totalItems: increment(quantity),
+        totalSpent: increment(totalAddedAmount),
+        totalItems: increment(totalAddedQuantity),
         lastOrderAt: now
       });
 
       // 4. Update Machine Variants
       const machine = machines.find(m => m.name === machineName);
-      const cleanVariant = variant.trim();
       if (machine) {
-        if (cleanVariant && !machine.variants.includes(cleanVariant)) {
+        const variantsToAdd = Array.from(newVariantsToSave).filter(v => !machine.variants.includes(v));
+        if (variantsToAdd.length > 0) {
           await updateDoc(doc(db, 'machines', machine.id), {
-            variants: [...machine.variants, cleanVariant],
+            variants: [...machine.variants, ...variantsToAdd],
             updatedAt: now
           });
         }
@@ -490,7 +599,7 @@ const CreateOrder = ({
         await setDoc(machineRef, {
           name: machineName,
           defaultPrice: price,
-          variants: cleanVariant ? [cleanVariant] : [],
+          variants: Array.from(newVariantsToSave),
           createdAt: now,
           updatedAt: now
         });
@@ -502,9 +611,7 @@ const CreateOrder = ({
       if (mode === 'same_cust') {
         // Clear items, keep customer
         setMachineName('');
-        setVariant('');
-        setQuantity(1);
-        setIsEco(false);
+        setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
       } else if (mode === 'same_item') {
         // Keep items, clear customer
         setCustomerName('');
@@ -514,9 +621,7 @@ const CreateOrder = ({
         // New - clear all
         setCustomerName('');
         setMachineName('');
-        setVariant('');
-        setQuantity(1);
-        setIsEco(false);
+        setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
         setActiveTab('orders');
       }
     } catch (err) {
@@ -553,27 +658,104 @@ const CreateOrder = ({
       </div>
 
       <div className="bg-card-white p-6 rounded-3xl card-shadow">
-        <div className="flex items-center gap-4 mb-4">
-          <div className="w-12 h-12 bg-background rounded-2xl flex items-center justify-center overflow-hidden flex-shrink-0 shadow-sm">
-            <Package className="w-6 h-6 text-ink/20" />
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 bg-background rounded-2xl flex items-center justify-center overflow-hidden flex-shrink-0 shadow-sm">
+              <Package className="w-6 h-6 text-ink/20" />
+            </div>
+            <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest">機台與款式</h3>
           </div>
-          <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest">機台與款式</h3>
+          <div>
+            <input 
+              type="file" 
+              accept="image/*" 
+              className="hidden" 
+              ref={fileInputRef}
+              onChange={handleImageUpload}
+            />
+            <div className="flex flex-col items-end gap-1">
+              <button 
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isAnalyzing}
+                className="px-4 py-2 bg-primary-blue/10 text-primary-blue rounded-xl text-sm font-bold flex items-center gap-2 hover:bg-primary-blue/20 transition-colors disabled:opacity-50"
+              >
+                {isAnalyzing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                {isAnalyzing ? '分析中...' : '圖片辨識'}
+              </button>
+              <span className="text-[10px] text-ink/30 font-bold">支援 Ctrl+V 貼上圖片</span>
+            </div>
+          </div>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+        <div className="grid grid-cols-1 gap-4 mb-4">
           <SuggestiveInput 
             value={machineName}
             onChange={setMachineName}
             placeholder="輸入機台名稱 (例: 吉伊卡哇)"
             suggestions={machineSuggestions}
           />
-          <div className="relative">
-            <SuggestiveInput 
-              value={variant}
-              onChange={setVariant}
-              placeholder="輸入款式 (選填)"
-              suggestions={variantSuggestions}
-            />
-          </div>
+        </div>
+
+        <div className="space-y-4 mb-6">
+          {orderItems.map((item, index) => (
+            <div key={item.id} className="flex flex-col gap-3 p-4 bg-background rounded-2xl">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold text-ink/40">款式 {index + 1}</h4>
+                {orderItems.length > 1 && (
+                  <button onClick={() => setOrderItems(orderItems.filter(i => i.id !== item.id))} className="text-red-400 hover:text-red-500 p-1">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="relative">
+                  <SuggestiveInput 
+                    value={item.variant}
+                    onChange={(v) => {
+                      const newItems = [...orderItems];
+                      newItems[index].variant = v;
+                      setOrderItems(newItems);
+                    }}
+                    placeholder="輸入款式 (選填)"
+                    suggestions={variantSuggestions}
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <button onClick={() => {
+                      const newItems = [...orderItems];
+                      newItems[index].quantity = Math.max(1, newItems[index].quantity - 1);
+                      setOrderItems(newItems);
+                    }} className="w-10 h-10 bg-card-white rounded-full flex items-center justify-center shadow-sm">-</button>
+                    <span className="text-xl font-bold w-8 text-center">{item.quantity}</span>
+                    <button onClick={() => {
+                      const newItems = [...orderItems];
+                      newItems[index].quantity++;
+                      setOrderItems(newItems);
+                    }} className="w-10 h-10 bg-card-white rounded-full flex items-center justify-center shadow-sm">+</button>
+                  </div>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input 
+                      type="checkbox" 
+                      checked={item.isEco} 
+                      onChange={(e) => {
+                        const newItems = [...orderItems];
+                        newItems[index].isEco = e.target.checked;
+                        setOrderItems(newItems);
+                      }}
+                      className="w-4 h-4 rounded text-primary-blue focus:ring-primary-blue"
+                    />
+                    <span className="text-xs font-bold text-ink/60">環保費 (+$10)</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          ))}
+          <button 
+            onClick={() => setOrderItems([...orderItems, { id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }])}
+            className="w-full py-3 border-2 border-dashed border-ink/20 text-ink/40 rounded-2xl font-bold text-sm hover:bg-ink/5 transition-colors flex items-center justify-center gap-2"
+          >
+            <Plus className="w-4 h-4" /> 新增款式
+          </button>
         </div>
         
         <div className="flex flex-wrap gap-2 mb-6">
@@ -593,27 +775,17 @@ const CreateOrder = ({
 
         <div className="flex items-center justify-between bg-background p-4 rounded-2xl mb-6">
           <div className="flex flex-col gap-2">
-            <div className="flex items-center gap-4">
-              <button onClick={() => setQuantity(Math.max(1, quantity - 1))} className="w-10 h-10 bg-card-white rounded-full flex items-center justify-center shadow-sm">-</button>
-              <span className="text-xl font-bold w-8 text-center">{quantity}</span>
-              <button onClick={() => setQuantity(quantity + 1)} className="w-10 h-10 bg-card-white rounded-full flex items-center justify-center shadow-sm">+</button>
-            </div>
-            <label className="flex items-center gap-2 cursor-pointer mt-2">
-              <input 
-                type="checkbox" 
-                checked={isEco} 
-                onChange={(e) => setIsEco(e.target.checked)}
-                className="w-4 h-4 rounded text-primary-blue focus:ring-primary-blue"
-              />
-              <span className="text-xs font-bold text-ink/60">環保費 (+$10)</span>
-            </label>
+            <p className="text-sm font-bold text-ink/60">訂單總計</p>
+            <p className="text-xs text-ink/40">共 {orderItems.reduce((sum, item) => sum + item.quantity, 0)} 項商品</p>
           </div>
           <div className="text-right">
-            <p className="text-xs text-ink/50 font-bold">單價</p>
+            <p className="text-xs text-ink/50 font-bold">單價基準</p>
             <p className="text-xl font-bold text-ink">
-              NT${(settings?.priceMap?.[price] || DEFAULT_PRICE_MAP[price] || 0) + (isEco ? 10 : 0)}
+              NT${settings?.priceMap?.[price] || DEFAULT_PRICE_MAP[price] || 0}
             </p>
-            <p className="text-[10px] text-ink/30">總計: NT${((settings?.priceMap?.[price] || DEFAULT_PRICE_MAP[price] || 0) + (isEco ? 10 : 0)) * quantity}</p>
+            <p className="text-[10px] text-ink/30">總計: NT${
+              orderItems.reduce((sum, item) => sum + ((settings?.priceMap?.[price] || DEFAULT_PRICE_MAP[price] || 0) + (item.isEco ? 10 : 0)) * item.quantity, 0)
+            }</p>
           </div>
         </div>
 
@@ -1516,7 +1688,10 @@ const CustomerDetailView = ({
   const customerOrders = orders.filter(o => o.customerId === customer.id);
   const [editingItem, setEditingItem] = useState<{ orderId: string, item: OrderItem } | null>(null);
   const [transferringItem, setTransferringItem] = useState<{ orderId: string, item: OrderItem } | null>(null);
+  const [transferQuantity, setTransferQuantity] = useState(1);
   const [targetCustomerName, setTargetCustomerName] = useState('');
+  const [releasingItem, setReleasingItem] = useState<{ orderId: string, item: OrderItem } | null>(null);
+  const [releaseQuantity, setReleaseQuantity] = useState(1);
 
   const handleRecalculateStats = async () => {
     try {
@@ -1572,7 +1747,7 @@ const CustomerDetailView = ({
   };
 
   const handleTransfer = async () => {
-    if (!transferringItem || !targetCustomerName.trim()) return;
+    if (!transferringItem || !targetCustomerName.trim() || transferQuantity < 1) return;
     const { orderId, item } = transferringItem;
     const trimmedTarget = targetCustomerName.trim();
 
@@ -1600,11 +1775,26 @@ const CustomerDetailView = ({
         targetCust = { id: targetId, ...newCust } as Customer;
       }
 
-      // 2. Remove from current order
+      // 2. Remove or update from current order
       const currentOrder = orders.find(o => o.id === orderId);
       if (!currentOrder) return;
 
-      const newItems = currentOrder.items.filter(i => i.id !== item.id);
+      const transferSubtotal = item.price * transferQuantity;
+      let newItems = [...currentOrder.items];
+      
+      if (transferQuantity === item.quantity) {
+        newItems = newItems.filter(i => i.id !== item.id);
+      } else {
+        const itemIdx = newItems.findIndex(i => i.id === item.id);
+        if (itemIdx > -1) {
+          newItems[itemIdx] = {
+            ...item,
+            quantity: item.quantity - transferQuantity,
+            subtotal: item.subtotal - transferSubtotal
+          };
+        }
+      }
+      
       const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
       await updateDoc(doc(db, 'orders', orderId), {
         items: newItems,
@@ -1612,8 +1802,8 @@ const CustomerDetailView = ({
         updatedAt: new Date().toISOString()
       });
       await updateDoc(doc(db, 'customers', customer.id), {
-        totalSpent: increment(-item.subtotal),
-        totalItems: increment(-item.quantity)
+        totalSpent: increment(-transferSubtotal),
+        totalItems: increment(-transferQuantity)
       });
 
       // 3. Add to target customer's pending order or create new
@@ -1632,33 +1822,33 @@ const CustomerDetailView = ({
           const existingItem = updatedItems[existingItemIdx];
           updatedItems[existingItemIdx] = {
             ...existingItem,
-            quantity: existingItem.quantity + item.quantity,
-            subtotal: (existingItem.quantity + item.quantity) * existingItem.price,
+            quantity: existingItem.quantity + transferQuantity,
+            subtotal: existingItem.subtotal + transferSubtotal,
             createdAt: now
           };
         } else {
-          updatedItems = [...targetOrder.items, { ...item, id: crypto.randomUUID(), createdAt: now }];
+          updatedItems = [...targetOrder.items, { ...item, id: crypto.randomUUID(), quantity: transferQuantity, subtotal: transferSubtotal, createdAt: now }];
         }
 
         await updateDoc(doc(db, 'orders', targetOrder.id), {
           items: updatedItems,
-          totalAmount: targetOrder.totalAmount + item.subtotal,
+          totalAmount: targetOrder.totalAmount + transferSubtotal,
           updatedAt: now
         });
       } else {
         await setDoc(doc(collection(db, 'orders')), {
           customerId: targetId,
           customerName: trimmedTarget,
-          items: [{ ...item, id: crypto.randomUUID(), createdAt: now }],
-          totalAmount: item.subtotal,
+          items: [{ ...item, id: crypto.randomUUID(), quantity: transferQuantity, subtotal: transferSubtotal, createdAt: now }],
+          totalAmount: transferSubtotal,
           status: 'pending',
           createdAt: now,
           updatedAt: now
         });
       }
       await updateDoc(doc(db, 'customers', targetId!), {
-        totalSpent: increment(item.subtotal),
-        totalItems: increment(item.quantity),
+        totalSpent: increment(transferSubtotal),
+        totalItems: increment(transferQuantity),
         lastOrderAt: new Date().toISOString()
       });
 
@@ -1677,23 +1867,35 @@ const CustomerDetailView = ({
         await deleteDoc(doc(db, 'releases', existing.id));
         showToast('已取消釋出');
       } else {
-        const releaseRef = doc(collection(db, 'releases'));
-        const releaseData: any = {
-          orderId,
-          itemId: item.id,
-          customerName: customer.name,
-          machineName: item.machineName,
-          quantity: item.quantity,
-          price: item.price,
-          status: 'pending',
-          createdAt: new Date().toISOString()
-        };
-        if (item.variant) {
-          releaseData.variant = item.variant;
-        }
-        await setDoc(releaseRef, releaseData);
-        showToast('正在釋出中');
+        setReleasingItem({ orderId, item });
+        setReleaseQuantity(item.quantity);
       }
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'releases');
+    }
+  };
+
+  const handleConfirmRelease = async () => {
+    if (!releasingItem || releaseQuantity < 1) return;
+    const { orderId, item } = releasingItem;
+    try {
+      const releaseRef = doc(collection(db, 'releases'));
+      const releaseData: any = {
+        orderId,
+        itemId: item.id,
+        customerName: customer.name,
+        machineName: item.machineName,
+        quantity: releaseQuantity,
+        price: item.price,
+        status: 'pending',
+        createdAt: new Date().toISOString()
+      };
+      if (item.variant) {
+        releaseData.variant = item.variant;
+      }
+      await setDoc(releaseRef, releaseData);
+      showToast('正在釋出中');
+      setReleasingItem(null);
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'releases');
     }
@@ -1795,7 +1997,10 @@ const CustomerDetailView = ({
                         <Save className="w-3 h-3" /> 編輯
                       </button>
                       <button 
-                        onClick={() => setTransferringItem({ orderId: order.id, item })}
+                        onClick={() => {
+                          setTransferringItem({ orderId: order.id, item });
+                          setTransferQuantity(item.quantity);
+                        }}
                         className="flex-1 py-2 bg-card-white text-ink/60 rounded-xl text-[10px] font-bold flex items-center justify-center gap-1"
                       >
                         <ArrowRight className="w-3 h-3" /> 轉讓
@@ -1807,7 +2012,7 @@ const CustomerDetailView = ({
                           isReleased ? "bg-orange-500 text-white" : "bg-card-white text-ink/60"
                         )}
                       >
-                        <LogOut className="w-3 h-3" /> {isReleased ? '正在釋出中' : '釋出'}
+                        <LogOut className="w-3 h-3" /> {isReleased ? `取消釋出 (${releases.find(r => r.orderId === order.id && r.itemId === item.id && r.status === 'pending')?.quantity})` : '釋出'}
                       </button>
                     </div>
                   </div>
@@ -1929,6 +2134,16 @@ const CustomerDetailView = ({
             >
               <h3 className="text-lg font-bold text-ink mb-4">轉讓項目</h3>
               <p className="text-sm text-ink/60 mb-4">將 {transferringItem.item.machineName} 轉讓給：</p>
+              
+              <div className="mb-4">
+                <label className="text-xs font-bold text-ink/40 block mb-2">轉讓數量</label>
+                <div className="flex items-center gap-4">
+                  <button onClick={() => setTransferQuantity(Math.max(1, transferQuantity - 1))} className="w-10 h-10 bg-background rounded-full flex items-center justify-center shadow-sm">-</button>
+                  <span className="text-xl font-bold w-8 text-center">{transferQuantity}</span>
+                  <button onClick={() => setTransferQuantity(Math.min(transferringItem.item.quantity, transferQuantity + 1))} className="w-10 h-10 bg-background rounded-full flex items-center justify-center shadow-sm">+</button>
+                </div>
+              </div>
+
               <SuggestiveInput 
                 value={targetCustomerName}
                 onChange={setTargetCustomerName}
@@ -1938,6 +2153,35 @@ const CustomerDetailView = ({
               <div className="flex gap-2 pt-6">
                 <button onClick={() => setTransferringItem(null)} className="flex-1 py-4 bg-background text-ink rounded-2xl font-bold">取消</button>
                 <button onClick={handleTransfer} className="flex-1 py-4 bg-primary-blue text-white rounded-2xl font-bold">確認轉讓</button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Release Modal */}
+      <AnimatePresence>
+        {releasingItem && (
+          <div className="fixed inset-0 z-[60] bg-black/40 flex items-end sm:items-center justify-center p-4">
+            <motion.div 
+              initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
+              className="bg-card-white w-full max-w-md p-6 rounded-t-3xl sm:rounded-3xl shadow-2xl"
+            >
+              <h3 className="text-lg font-bold text-ink mb-4">釋出項目</h3>
+              <p className="text-sm text-ink/60 mb-4">釋出 {releasingItem.item.machineName} {releasingItem.item.variant && `(${releasingItem.item.variant})`}</p>
+              
+              <div className="mb-4">
+                <label className="text-xs font-bold text-ink/40 block mb-2">釋出數量</label>
+                <div className="flex items-center gap-4">
+                  <button onClick={() => setReleaseQuantity(Math.max(1, releaseQuantity - 1))} className="w-10 h-10 bg-background rounded-full flex items-center justify-center shadow-sm">-</button>
+                  <span className="text-xl font-bold w-8 text-center">{releaseQuantity}</span>
+                  <button onClick={() => setReleaseQuantity(Math.min(releasingItem.item.quantity, releaseQuantity + 1))} className="w-10 h-10 bg-background rounded-full flex items-center justify-center shadow-sm">+</button>
+                </div>
+              </div>
+
+              <div className="flex gap-2 pt-6">
+                <button onClick={() => setReleasingItem(null)} className="flex-1 py-4 bg-background text-ink rounded-2xl font-bold">取消</button>
+                <button onClick={handleConfirmRelease} className="flex-1 py-4 bg-orange-500 text-white rounded-2xl font-bold shadow-lg shadow-orange-500/20">確認釋出</button>
               </div>
             </motion.div>
           </div>
