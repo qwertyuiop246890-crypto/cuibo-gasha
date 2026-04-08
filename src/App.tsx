@@ -4,7 +4,8 @@ import {
   Search, Printer, Copy, Download, Upload, Trash2, 
   LogOut, ChevronRight, CheckCircle2, AlertCircle, X,
   ArrowLeft, Save, RefreshCw, TrendingUp, MessageSquare,
-  Coins, ArrowRight, Database, Home, ArrowRightLeft, UserPlus
+  Coins, ArrowRight, Database, Home, ArrowRightLeft, UserPlus,
+  Grid2x2, LayoutGrid
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -353,6 +354,8 @@ const CreateOrder = ({
   const [price, setPrice] = useState<number>(100);
   const [orderItems, setOrderItems] = useState([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [uploadedImage, setUploadedImage] = useState<string | null>(null);
+  const [isFullscreenImage, setIsFullscreenImage] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const processImage = async (file: File) => {
@@ -360,64 +363,142 @@ const CreateOrder = ({
     showToast('正在分析圖片...', 'success');
 
     try {
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        const base64String = (reader.result as string).split(',')[1];
-        
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const response = await ai.models.generateContent({
-          model: "gemini-3-flash-preview",
-          contents: [
-            {
-              inlineData: {
-                data: base64String,
-                mimeType: file.type
-              }
-            },
-            "Analyze this image of a gachapon (capsule toy) or its promotional material. Extract the following information and return it as a JSON object: 'machineName' (string, the name of the gachapon series/machine), 'variants' (array of strings, the specific characters or variants shown, if applicable), 'price' (number, the price in JPY or NTD, just the number). If you cannot find a specific field, leave it empty or 0. Translate names to Traditional Chinese if possible."
-          ],
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                machineName: { type: Type.STRING },
-                variants: { 
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING }
-                },
-                price: { type: Type.NUMBER }
-              }
-            }
-          }
-        });
+      const compressImage = (file: File): Promise<string> => {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.readAsDataURL(file);
+          reader.onload = (event) => {
+            const img = new Image();
+            img.src = event.target?.result as string;
+            img.onload = () => {
+              const canvas = document.createElement('canvas');
+              const MAX_WIDTH = 1024;
+              const MAX_HEIGHT = 1024;
+              let width = img.width;
+              let height = img.height;
 
-        if (response.text) {
-          const result = JSON.parse(response.text);
-          if (result.machineName) setMachineName(result.machineName);
-          if (result.variants && result.variants.length > 0) {
-            setOrderItems(result.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
-          } else if (result.variant) {
-            setOrderItems([{ id: crypto.randomUUID(), variant: result.variant, quantity: 1, isEco: false }]);
+              if (width > height) {
+                if (width > MAX_WIDTH) {
+                  height *= MAX_WIDTH / width;
+                  width = MAX_WIDTH;
+                }
+              } else {
+                if (height > MAX_HEIGHT) {
+                  width *= MAX_HEIGHT / height;
+                  height = MAX_HEIGHT;
+                }
+              }
+
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext('2d');
+              if (ctx) {
+                ctx.fillStyle = '#FFFFFF';
+                ctx.fillRect(0, 0, width, height);
+                ctx.drawImage(img, 0, 0, width, height);
+              }
+              resolve(canvas.toDataURL('image/jpeg', 0.85));
+            };
+            img.onerror = (error) => reject(error);
+          };
+          reader.onerror = (error) => reject(error);
+        });
+      };
+
+      const compressedDataUrl = await compressImage(file);
+      const base64String = compressedDataUrl.split(',')[1];
+      setUploadedImage(compressedDataUrl);
+      
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+      
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                inlineData: {
+                  data: base64String,
+                  mimeType: "image/jpeg"
+                }
+              },
+              {
+                text: "請根據系統指令分析此圖片，並嚴格依照指定的 JSON 格式回傳結果。"
+              }
+            ]
           }
-          if (result.price) {
-            // Try to map JPY to NTD if it looks like JPY (e.g., 300, 400, 500)
-            const map = settings?.priceMap || DEFAULT_PRICE_MAP;
-            if (map[result.price]) {
-               setPrice(result.price); // Set JPY price directly, the submitOrder handles the conversion
-            } else {
-               // If it's already NTD or unknown, we might just set it as JPY price and let user adjust, or find closest.
-               // Let's just set it to the raw number and let the user adjust if needed.
-               // Actually, the price state is the JPY price (e.g. 300, 400).
-               // If the AI returns 300, it sets price to 300.
-               setPrice(result.price);
+        ],
+        config: {
+          systemInstruction: `[角色任務]
+你是一位嚴謹且精通日文的電商倉儲與商品辨識 AI 專家，專為代購營運系統設計，負責將視覺資訊精準轉化為高效率、易於複製的撿貨標籤與建檔資料，協助倉儲助理無縫管理扭蛋等商品訂單。
+
+[背景資訊]
+為了提升實體撿貨的直覺性與作業效率，必須將圖片中的商品轉換為標準化名稱。以圖片確切證據為優先，遇遮擋、標籤不清楚或缺乏明顯特徵時，必須主動啟動網路搜尋進行交叉比對與補全。維持撿貨名稱與視覺特徵的高度一致性是庫存管理的核心。
+
+[具體指令]
+1. 歷史翻譯與特徵擷取：精確辨識圖片中的日文原文與核心外觀特徵（如顏色、手持配件、動作）。
+2. 標準化組合：將名稱依序組合為：[販售地點/品牌] [主要角色/系列總稱] [款式視覺核心特徵] [物品類型]。
+3. 扭蛋特殊處理（15字極簡標題 + 肉眼優先檢貨標籤）：若商品為扭蛋，請翻譯中文名稱，並建立「系列檢貨標題」。標題總字數嚴格限制在 15 字以內（主動去除贅字，僅保留核心角色與主題）。接著，完整條列該系列「每一款」的名稱與具備最強視覺識別性的「視覺特徵檢貨名稱」。格式請務必使用：[角色/款式名稱] [視覺特徵]（例如：美樂蒂 手上拿麥克風）。請勿包含括號或「檢貨」字樣，以確保列印美觀。
+4. 個別獨立介紹：將圖片中的商品個別分開列出。
+
+[約束條件]
+- 視覺核心優先與字數限制：去除所有行銷贅字。扭蛋系列檢貨標題絕對不可超過 15 個字。單款視覺特徵檢貨名稱應極致精煉，專注描述核心外觀差異，格式為「名稱+特徵」。
+- 證據優先：嚴禁使用「可能、應該、或許」等模糊推測。
+- 允許留白：若信心水準仍低於 90% 或無法確認品項，請直接放棄該品項命名，並輸出：「【資料不足，無法確認】」。
+- 格式要求：一律使用繁體中文。`,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              machineName: { 
+                type: Type.STRING,
+                description: "系列檢貨標題，嚴格限制在 15 字以內"
+              },
+              variants: { 
+                type: Type.ARRAY,
+                items: { 
+                  type: Type.STRING,
+                  description: "視覺特徵檢貨名稱，格式：[角色名稱] [特徵]，例如：美樂蒂 手上拿麥克風"
+                }
+              },
+              price: { 
+                type: Type.NUMBER,
+                description: "辨識出的金額"
+              }
             }
           }
-          showToast('圖片分析完成！', 'success');
         }
-        setIsAnalyzing(false);
-      };
-      reader.readAsDataURL(file);
+      });
+
+      const text = response.text;
+      if (text) {
+        const result = JSON.parse(text);
+        if (result.machineName) setMachineName(result.machineName);
+        if (result.variants && result.variants.length > 0) {
+          setOrderItems(result.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
+        } else if (result.variant) {
+          setOrderItems([{ id: crypto.randomUUID(), variant: result.variant, quantity: 1, isEco: false }]);
+        } else {
+          // If no variants found, still keep at least one item
+          setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
+        }
+        if (result.price) {
+          // Try to map JPY to NTD if it looks like JPY (e.g., 300, 400, 500)
+          const map = settings?.priceMap || DEFAULT_PRICE_MAP;
+          if (map[result.price]) {
+             setPrice(result.price); // Set JPY price directly, the submitOrder handles the conversion
+          } else {
+             // If it's already NTD or unknown, we might just set it as JPY price and let user adjust, or find closest.
+             // Let's just set it to the raw number and let the user adjust if needed.
+             // Actually, the price state is the JPY price (e.g. 300, 400).
+             // If the AI returns 300, it sets price to 300.
+             setPrice(result.price);
+          }
+        }
+        showToast('圖片分析完成！', 'success');
+      }
+      setIsAnalyzing(false);
     } catch (err) {
       console.error(err);
       showToast('圖片分析失敗，請稍後再試', 'error');
@@ -478,39 +559,65 @@ const CreateOrder = ({
 
   const submitOrder = async (mode: 'same_cust' | 'same_item' | 'same_both' | 'new') => {
     const trimmedName = customerName.trim();
-    if (!trimmedName || !machineName) {
-      showToast('請填寫顧客名稱與機台名稱', 'error');
+    
+    let totalAddedQuantity = 0;
+    const newVariantsToSave = new Set<string>();
+
+    for (const orderItem of orderItems) {
+      if (orderItem.variant.trim()) {
+        newVariantsToSave.add(orderItem.variant.trim());
+      }
+      if (orderItem.quantity > 0) {
+        totalAddedQuantity += orderItem.quantity;
+      }
+    }
+
+    if (!machineName) {
+      showToast('請填寫機台名稱', 'error');
+      return;
+    }
+
+    if (totalAddedQuantity > 0 && !trimmedName) {
+      showToast('請填寫顧客名稱', 'error');
+      return;
+    }
+
+    if (totalAddedQuantity === 0 && newVariantsToSave.size === 0 && !uploadedImage) {
+      showToast('請至少輸入一個數量大於0的項目，或輸入款式/上傳圖片以建立機台資料', 'error');
       return;
     }
     
     const now = new Date().toISOString();
     
     try {
-      // 1. Find or Create Customer
-      let customer = customers.find(c => c.name.trim() === trimmedName);
-      let customerId = customer?.id;
+      let customerId: string | undefined;
+      let existingOrder: Order | undefined;
 
-      if (!customer) {
-        const newCustRef = doc(collection(db, 'customers'));
-        const newCust: Omit<Customer, 'id'> = {
-          name: trimmedName,
-          totalSpent: 0,
-          totalItems: 0,
-          createdAt: now,
-          lastOrderAt: now
-        };
-        await setDoc(newCustRef, newCust);
-        customerId = newCustRef.id;
-        customer = { id: customerId, ...newCust };
+      if (totalAddedQuantity > 0) {
+        // 1. Find or Create Customer
+        let customer = customers.find(c => c.name.trim() === trimmedName);
+        customerId = customer?.id;
+
+        if (!customer) {
+          const newCustRef = doc(collection(db, 'customers'));
+          const newCust: Omit<Customer, 'id'> = {
+            name: trimmedName,
+            totalSpent: 0,
+            totalItems: 0,
+            createdAt: now,
+            lastOrderAt: now
+          };
+          await setDoc(newCustRef, newCust);
+          customerId = newCustRef.id;
+          customer = { id: customerId, ...newCust };
+        }
+
+        // 2. Find existing pending order for this customer to consolidate
+        existingOrder = orders.find(o => o.customerId === customerId && o.status === 'pending');
       }
-
-      // 2. Find existing pending order for this customer to consolidate
-      const existingOrder = orders.find(o => o.customerId === customerId && o.status === 'pending');
       
       let updatedItems = existingOrder ? [...existingOrder.items] : [];
       let totalAddedAmount = 0;
-      let totalAddedQuantity = 0;
-      const newVariantsToSave = new Set<string>();
 
       for (const orderItem of orderItems) {
         if (orderItem.quantity <= 0) continue;
@@ -520,10 +627,6 @@ const CreateOrder = ({
         const finalVariant = orderItem.variant + (orderItem.isEco ? ' (環保)' : '');
         
         totalAddedAmount += subtotal;
-        totalAddedQuantity += orderItem.quantity;
-        if (orderItem.variant.trim()) {
-          newVariantsToSave.add(orderItem.variant.trim());
-        }
 
         const existingItemIdx = updatedItems.findIndex(i => 
           i.machineName === machineName && 
@@ -551,67 +654,73 @@ const CreateOrder = ({
         }
       }
 
-      if (totalAddedQuantity === 0) {
-        showToast('請至少輸入一個數量大於0的項目', 'error');
-        return;
-      }
-
-      if (existingOrder) {
-        await updateDoc(doc(db, 'orders', existingOrder.id), {
-          items: updatedItems,
-          totalAmount: existingOrder.totalAmount + totalAddedAmount,
-          updatedAt: now
+      if (totalAddedQuantity > 0 && customerId) {
+        if (existingOrder) {
+          await updateDoc(doc(db, 'orders', existingOrder.id), {
+            items: updatedItems,
+            totalAmount: existingOrder.totalAmount + totalAddedAmount,
+            updatedAt: now
+          });
+        } else {
+          // Create new order
+          const orderRef = doc(collection(db, 'orders'));
+          const newOrder: Omit<Order, 'id'> = {
+            customerId: customerId!,
+            customerName: trimmedName,
+            items: updatedItems,
+            totalAmount: totalAddedAmount,
+            status: 'pending',
+            createdAt: now,
+            updatedAt: now
+          };
+          await setDoc(orderRef, newOrder);
+        }
+        
+        // 3. Update customer stats
+        await updateDoc(doc(db, 'customers', customerId!), {
+          totalSpent: increment(totalAddedAmount),
+          totalItems: increment(totalAddedQuantity),
+          lastOrderAt: now
         });
-      } else {
-        // Create new order
-        const orderRef = doc(collection(db, 'orders'));
-        const newOrder: Omit<Order, 'id'> = {
-          customerId: customerId!,
-          customerName: trimmedName,
-          items: updatedItems,
-          totalAmount: totalAddedAmount,
-          status: 'pending',
-          createdAt: now,
-          updatedAt: now
-        };
-        await setDoc(orderRef, newOrder);
       }
-      
-      // 3. Update customer stats
-      await updateDoc(doc(db, 'customers', customerId!), {
-        totalSpent: increment(totalAddedAmount),
-        totalItems: increment(totalAddedQuantity),
-        lastOrderAt: now
-      });
 
-      // 4. Update Machine Variants
+      // 4. Update Machine Variants and Image
       const machine = machines.find(m => m.name === machineName);
       if (machine) {
         const variantsToAdd = Array.from(newVariantsToSave).filter(v => !machine.variants.includes(v));
+        const updates: any = { updatedAt: now };
         if (variantsToAdd.length > 0) {
-          await updateDoc(doc(db, 'machines', machine.id), {
-            variants: [...machine.variants, ...variantsToAdd],
-            updatedAt: now
-          });
+          updates.variants = [...machine.variants, ...variantsToAdd];
+        }
+        if (uploadedImage && machine.imageUrl !== uploadedImage) {
+          updates.imageUrl = uploadedImage;
+        }
+        if (Object.keys(updates).length > 1) { // more than just updatedAt
+          await updateDoc(doc(db, 'machines', machine.id), updates);
         }
       } else {
         const machineRef = doc(collection(db, 'machines'));
-        await setDoc(machineRef, {
+        const newMachine: any = {
           name: machineName,
           defaultPrice: price,
           variants: Array.from(newVariantsToSave),
           createdAt: now,
           updatedAt: now
-        });
+        };
+        if (uploadedImage) {
+          newMachine.imageUrl = uploadedImage;
+        }
+        await setDoc(machineRef, newMachine);
       }
 
-      showToast('訂單已更新/建立！');
+      showToast(totalAddedQuantity > 0 ? '訂單已更新/建立！' : '機台資料已建立！');
 
       // Handle Modes
       if (mode === 'same_cust') {
         // Clear items, keep customer
         setMachineName('');
         setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
+        setUploadedImage(null);
       } else if (mode === 'same_item') {
         // Keep items, clear customer
         setCustomerName('');
@@ -622,10 +731,11 @@ const CreateOrder = ({
         setCustomerName('');
         setMachineName('');
         setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
+        setUploadedImage(null);
         setActiveTab('orders');
       }
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, 'orders/customers');
+      handleFirestoreError(err, OperationType.WRITE, 'submitOrder');
     }
   };
 
@@ -686,6 +796,27 @@ const CreateOrder = ({
             </div>
           </div>
         </div>
+
+        {uploadedImage && (
+          <div className="mb-6 relative group cursor-pointer" onClick={() => setIsFullscreenImage(true)}>
+            <div className="w-full h-80 sm:h-96 rounded-2xl overflow-hidden bg-background border border-divider relative">
+              <img src={uploadedImage} alt="Uploaded" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+              <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center">
+                <span className="bg-black/50 text-white px-3 py-1 rounded-full text-xs opacity-0 group-hover:opacity-100 transition-opacity">點擊放大</span>
+              </div>
+            </div>
+            <button 
+              onClick={(e) => {
+                e.stopPropagation();
+                setUploadedImage(null);
+              }}
+              className="absolute top-2 right-2 p-2 bg-white/80 hover:bg-white rounded-full shadow-sm text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+            >
+              <Trash2 className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 gap-4 mb-4">
           <SuggestiveInput 
             value={machineName}
@@ -723,7 +854,7 @@ const CreateOrder = ({
                   <div className="flex items-center gap-4">
                     <button onClick={() => {
                       const newItems = [...orderItems];
-                      newItems[index].quantity = Math.max(1, newItems[index].quantity - 1);
+                      newItems[index].quantity = Math.max(0, newItems[index].quantity - 1);
                       setOrderItems(newItems);
                     }} className="w-10 h-10 bg-card-white rounded-full flex items-center justify-center shadow-sm">-</button>
                     <span className="text-xl font-bold w-8 text-center">{item.quantity}</span>
@@ -820,6 +951,24 @@ const CreateOrder = ({
           </button>
         </div>
       </div>
+      <AnimatePresence>
+        {isFullscreenImage && uploadedImage && (
+          <div 
+            className="fixed inset-0 z-[100] bg-black/90 flex items-center justify-center p-4 cursor-pointer"
+            onClick={() => setIsFullscreenImage(false)}
+          >
+            <motion.img 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              src={uploadedImage} 
+              alt="Fullscreen" 
+              className="max-w-full max-h-full object-contain rounded-lg"
+              referrerPolicy="no-referrer"
+            />
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
@@ -828,12 +977,14 @@ const OrdersList = ({
   orders, 
   machines,
   setConfirmModal,
-  showToast
+  showToast,
+  setEditingMachine
 }: { 
   orders: Order[], 
   machines: any[],
   setConfirmModal: (m: any) => void,
-  showToast: (m: string, t?: 'success' | 'error') => void
+  showToast: (m: string, t?: 'success' | 'error') => void,
+  setEditingMachine: (m: any) => void
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [editingItem, setEditingItem] = useState<{ orderId: string, item: OrderItem } | null>(null);
@@ -869,6 +1020,15 @@ const OrdersList = ({
     }
   };
 
+  const filteredOrders = orders.filter(o => {
+    const lowerSearch = searchTerm.toLowerCase();
+    return o.customerName.toLowerCase().includes(lowerSearch) ||
+           o.items.some(item => 
+             item.machineName.toLowerCase().includes(lowerSearch) || 
+             (item.variant && item.variant.toLowerCase().includes(lowerSearch))
+           );
+  });
+
   return (
     <div className="space-y-4">
       <div className="relative mb-6">
@@ -881,87 +1041,116 @@ const OrdersList = ({
         />
       </div>
       
-      {orders.filter(o => {
-        const lowerSearch = searchTerm.toLowerCase();
-        return o.customerName.toLowerCase().includes(lowerSearch) ||
-               o.items.some(item => 
-                 item.machineName.toLowerCase().includes(lowerSearch) || 
-                 (item.variant && item.variant.toLowerCase().includes(lowerSearch))
-               );
-      }).map(order => (
-        <motion.div 
-          layout
-          key={order.id} 
-          className="bg-card-white p-6 rounded-3xl card-shadow border-l-4 border-primary-blue"
-        >
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h4 className="font-bold text-lg text-ink">{order.customerName}</h4>
-              <div className="flex items-center gap-2">
-                <p className="text-xs text-ink/40">{order.createdAt ? format(toZonedTime(new Date(order.createdAt), TAIWAN_TZ), 'yyyy/MM/dd HH:mm') : '無日期'}</p>
-                <span className="text-[10px] text-ink/20">•</span>
-                <p className="text-xs text-ink/40">共 {order.items.reduce((sum, i) => sum + i.quantity, 0)} 顆</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <div className="text-right">
-                <p className="text-xl font-bold text-ink">NT${order.totalAmount}</p>
-              </div>
-              <button 
-                onClick={() => {
-                  setConfirmModal({
-                    show: true,
-                    title: '刪除訂單',
-                    message: `確定要刪除 ${order.customerName} 的這筆訂單嗎？`,
-                    type: 'danger',
-                    onConfirm: async () => {
-                      try {
-                        await deleteDoc(doc(db, 'orders', order.id));
-                        
-                        // Update customer stats
-                        await updateDoc(doc(db, 'customers', order.customerId), {
-                          totalSpent: increment(-order.totalAmount),
-                          totalItems: increment(-order.items.reduce((sum, i) => sum + i.quantity, 0))
-                        });
-
-                        showToast('訂單已刪除');
-                      } catch (err) {
-                        handleFirestoreError(err, OperationType.DELETE, `orders/${order.id}`);
-                      }
-                    }
-                  });
-                }}
-                className="p-2 text-red-400 hover:bg-red-50 rounded-xl transition-colors"
-              >
-                <Trash2 className="w-5 h-5" />
-              </button>
-            </div>
+      {filteredOrders.length === 0 ? (
+        <div className="bg-card-white p-12 rounded-3xl card-shadow text-center">
+          <div className="w-16 h-16 bg-background rounded-full flex items-center justify-center mx-auto mb-4">
+            <Package className="w-8 h-8 text-ink/20" />
           </div>
-          <div className="space-y-2 mb-4">
-            {order.items.map((item, idx) => {
-              const machine = machines.find(m => m.name === item.machineName);
-              return (
-                <div 
-                  key={idx} 
-                  onClick={() => setEditingItem({ orderId: order.id, item })}
-                  className="flex items-center justify-between text-sm p-2 hover:bg-background rounded-xl cursor-pointer transition-colors"
+          <p className="text-ink/40 font-bold">尚未有訂單資料</p>
+          {searchTerm && <p className="text-xs text-ink/20 mt-1">請嘗試其他搜尋關鍵字</p>}
+        </div>
+      ) : (
+        filteredOrders.map(order => (
+          <motion.div 
+            layout
+            key={order.id} 
+            className="bg-card-white p-6 rounded-3xl card-shadow border-l-4 border-primary-blue"
+          >
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h4 className="font-bold text-lg text-ink">{order.customerName}</h4>
+                <div className="flex items-center gap-2">
+                  <p className="text-xs text-ink/40">{order.createdAt ? format(toZonedTime(new Date(order.createdAt), TAIWAN_TZ), 'yyyy/MM/dd HH:mm') : '無日期'}</p>
+                  <span className="text-[10px] text-ink/20">•</span>
+                  <p className="text-xs text-ink/40">共 {order.items.reduce((sum, i) => sum + i.quantity, 0)} 顆</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="text-right">
+                  <p className="text-xl font-bold text-ink">NT${order.totalAmount}</p>
+                </div>
+                <button 
+                  onClick={() => {
+                    setConfirmModal({
+                      show: true,
+                      title: '刪除訂單',
+                      message: `確定要刪除 ${order.customerName} 的這筆訂單嗎？`,
+                      type: 'danger',
+                      onConfirm: async () => {
+                        try {
+                          await deleteDoc(doc(db, 'orders', order.id));
+                          
+                          // Update customer stats
+                          await updateDoc(doc(db, 'customers', order.customerId), {
+                            totalSpent: increment(-order.totalAmount),
+                            totalItems: increment(-order.items.reduce((sum, i) => sum + i.quantity, 0))
+                          });
+
+                          showToast('訂單已刪除');
+                        } catch (err) {
+                          handleFirestoreError(err, OperationType.DELETE, `orders/${order.id}`);
+                        }
+                      }
+                    });
+                  }}
+                  className="p-2 text-red-400 hover:bg-red-50 rounded-xl transition-colors"
                 >
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 bg-background rounded-lg flex items-center justify-center overflow-hidden flex-shrink-0">
-                      <Package className="w-4 h-4 text-ink/20" />
+                  <Trash2 className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+            <div className="space-y-2 mb-4">
+              {order.items.map((item, idx) => {
+                const machine = machines.find(m => m.name === item.machineName);
+                return (
+                  <div 
+                    key={idx} 
+                    className="flex items-center justify-between text-sm p-2 hover:bg-background rounded-xl transition-colors group"
+                  >
+                    <div 
+                      className="flex items-center gap-3 cursor-pointer"
+                      onClick={() => {
+                        if (machine) {
+                          setEditingMachine(machine);
+                        } else {
+                          setEditingMachine({
+                            id: '',
+                            name: item.machineName,
+                            defaultPrice: 0,
+                            variants: [],
+                            imageUrl: null
+                          });
+                        }
+                      }}
+                    >
+                      <div className="w-8 h-8 bg-background rounded-lg flex items-center justify-center overflow-hidden flex-shrink-0">
+                        {machine?.imageUrl ? (
+                          <img src={machine.imageUrl} alt={item.machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                        ) : (
+                          <Package className="w-4 h-4 text-ink/20" />
+                        )}
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-ink/70 group-hover:text-primary-blue transition-colors">{item.machineName} {item.variant && `(${item.variant})`}</span>
+                        <span className="text-[10px] text-ink/30">{formatDateTime(item.createdAt)}</span>
+                      </div>
                     </div>
-                    <div className="flex flex-col">
-                      <span className="text-ink/70">{item.machineName} {item.variant && `(${item.variant})`}</span>
-                      <span className="text-[10px] text-ink/30">{formatDateTime(item.createdAt)}</span>
+                    <div className="flex items-center gap-3">
+                      <span className="font-medium text-ink/40">NT${item.price} x {item.quantity}</span>
+                      <button 
+                        onClick={() => setEditingItem({ orderId: order.id, item })}
+                        className="p-1.5 text-ink/40 hover:text-primary-blue hover:bg-primary-blue/10 rounded-lg opacity-0 group-hover:opacity-100 transition-all"
+                      >
+                        <Save className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   </div>
-                  <span className="font-medium text-ink/40">NT${item.price} x {item.quantity}</span>
-                </div>
-              );
-            })}
-          </div>
-        </motion.div>
-      ))}
+                );
+              })}
+            </div>
+          </motion.div>
+        ))
+      )}
 
       {/* Edit Modal */}
       <AnimatePresence>
@@ -1157,65 +1346,434 @@ const CustomersList = ({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        {sortedCustomers.map(customer => (
-          <div 
-            key={customer.id} 
-            onClick={() => onSelectCustomer(customer)}
-            className="bg-card-white p-6 rounded-3xl card-shadow flex items-center justify-between group cursor-pointer hover:bg-background transition-colors"
-          >
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 bg-primary-blue/10 rounded-2xl flex items-center justify-center text-primary-blue font-bold text-xl">
-                {customer.name[0]}
+      {sortedCustomers.length === 0 ? (
+        <div className="bg-card-white p-12 rounded-3xl card-shadow text-center">
+          <div className="w-16 h-16 bg-background rounded-full flex items-center justify-center mx-auto mb-4">
+            <Users className="w-8 h-8 text-ink/20" />
+          </div>
+          <p className="text-ink/40 font-bold">尚未有顧客資料</p>
+          {searchTerm && <p className="text-xs text-ink/20 mt-1">請嘗試其他搜尋關鍵字</p>}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {sortedCustomers.map(customer => (
+            <div 
+              key={customer.id} 
+              onClick={() => onSelectCustomer(customer)}
+              className="bg-card-white p-6 rounded-3xl card-shadow flex items-center justify-between group cursor-pointer hover:bg-background transition-colors"
+            >
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 bg-primary-blue/10 rounded-2xl flex items-center justify-center text-primary-blue font-bold text-xl">
+                  {customer.name[0]}
+                </div>
+                <div>
+                  <h4 className="font-bold text-ink">{customer.name}</h4>
+                  <p className="text-xs text-ink/40">共 {customer.totalItems || 0} 顆</p>
+                </div>
               </div>
-              <div>
-                <h4 className="font-bold text-ink">{customer.name}</h4>
-                <p className="text-xs text-ink/40">共 {customer.totalItems || 0} 顆</p>
+              <div className="flex items-center gap-4">
+                <div className="text-right">
+                  <p className="font-bold text-ink">NT${customer.totalSpent}</p>
+                  <p className="text-[10px] text-ink/30">最後消費: {customer.lastOrderAt ? format(toZonedTime(new Date(customer.lastOrderAt), TAIWAN_TZ), 'MM/dd') : '無'}</p>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCopyNotification(customer);
+                    }}
+                    className="p-2 text-primary-blue hover:bg-primary-blue/10 rounded-xl transition-colors"
+                    title="複製通知"
+                  >
+                    <Copy className="w-4 h-4" />
+                  </button>
+                  <button 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setConfirmModal({
+                        show: true,
+                        title: '刪除顧客',
+                        message: `確定要刪除顧客 ${customer.name} 嗎？`,
+                        checkboxLabel: '同時刪除該顧客的所有訂單',
+                        type: 'danger',
+                        onConfirm: async (checked?: boolean) => {
+                          try {
+                            const batch = writeBatch(db);
+                            batch.delete(doc(db, 'customers', customer.id));
+                            
+                            if (checked) {
+                              const customerOrders = orders.filter(o => o.customerId === customer.id);
+                              customerOrders.forEach(order => {
+                                batch.delete(doc(db, 'orders', order.id));
+                              });
+                            }
+                            
+                            await batch.commit();
+                            showToast('顧客已刪除');
+                          } catch (err) {
+                            handleFirestoreError(err, OperationType.DELETE, `customers/${customer.id}`);
+                          }
+                        }
+                      });
+                    }}
+                    className="p-2 text-ink/20 hover:text-red-500 hover:bg-red-50 rounded-xl transition-colors"
+                    title="刪除顧客"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
             </div>
-            <div className="flex items-center gap-4">
-              <div className="text-right">
-                <p className="font-bold text-ink">NT${customer.totalSpent}</p>
-                <p className="text-[10px] text-ink/30">最後消費: {customer.lastOrderAt ? format(toZonedTime(new Date(customer.lastOrderAt), TAIWAN_TZ), 'MM/dd') : '無'}</p>
-              </div>
-              <div className="flex items-center gap-1">
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const MachineEditModal = ({
+  machine,
+  onClose,
+  onSave,
+  onDelete,
+  orders,
+  settings,
+  showToast
+}: {
+  machine: any;
+  onClose: () => void;
+  onSave: (data: any, oldName: string, variantMapping: Record<string, string>, syncWithOrders: boolean) => Promise<void>;
+  onDelete: (machineId: string, machineName: string) => void;
+  orders: Order[];
+  settings: SystemSettings | null;
+  showToast: (m: string, t?: 'success' | 'error') => void;
+}) => {
+  const [name, setName] = useState(machine.name);
+  const [price, setPrice] = useState(machine.defaultPrice.toString());
+  const [variantList, setVariantList] = useState<string[]>(machine.variants || []);
+  const [newVariant, setNewVariant] = useState('');
+  const [editingVariantIndex, setEditingVariantIndex] = useState<number | null>(null);
+  const [editingVariantValue, setEditingVariantValue] = useState('');
+  const [variantMapping, setVariantMapping] = useState<Record<string, string>>({});
+  const [uploadedImage, setUploadedImage] = useState<string | null>(machine.imageUrl || null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const img = new Image();
+        img.src = reader.result as string;
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const MAX_WIDTH = 800;
+          const MAX_HEIGHT = 800;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > MAX_WIDTH) {
+              height *= MAX_WIDTH / width;
+              width = MAX_WIDTH;
+            }
+          } else {
+            if (height > MAX_HEIGHT) {
+              width *= MAX_HEIGHT / height;
+              height = MAX_HEIGHT;
+            }
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(0, 0, width, height);
+            ctx.drawImage(img, 0, 0, width, height);
+          }
+          setUploadedImage(canvas.toDataURL('image/jpeg', 0.7));
+        };
+      };
+      reader.readAsDataURL(file);
+    }
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handlePaste = (e: ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf('image') !== -1) {
+        const file = items[i].getAsFile();
+        if (file) {
+          e.preventDefault();
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const img = new Image();
+            img.src = reader.result as string;
+            img.onload = () => {
+              const canvas = document.createElement('canvas');
+              const MAX_WIDTH = 800;
+              const MAX_HEIGHT = 800;
+              let width = img.width;
+              let height = img.height;
+
+              if (width > height) {
+                if (width > MAX_WIDTH) {
+                  height *= MAX_WIDTH / width;
+                  width = MAX_WIDTH;
+                }
+              } else {
+                if (height > MAX_HEIGHT) {
+                  width *= MAX_HEIGHT / height;
+                  height = MAX_HEIGHT;
+                }
+              }
+
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext('2d');
+              if (ctx) {
+                ctx.fillStyle = '#FFFFFF';
+                ctx.fillRect(0, 0, width, height);
+                ctx.drawImage(img, 0, 0, width, height);
+              }
+              setUploadedImage(canvas.toDataURL('image/jpeg', 0.7));
+            };
+          };
+          reader.readAsDataURL(file);
+          break;
+        }
+      }
+    }
+  };
+
+  useEffect(() => {
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, []);
+
+  const addVariant = () => {
+    if (newVariant.trim() && !variantList.includes(newVariant.trim())) {
+      setVariantList([...variantList, newVariant.trim()]);
+      setNewVariant('');
+    }
+  };
+
+  const removeVariant = (v: string) => {
+    setVariantList(variantList.filter(item => item !== v));
+  };
+
+  const startEditingVariant = (index: number, value: string) => {
+    setEditingVariantIndex(index);
+    setEditingVariantValue(value);
+  };
+
+  const saveEditedVariant = () => {
+    if (editingVariantIndex !== null && editingVariantValue.trim()) {
+      const oldVal = variantList[editingVariantIndex];
+      const newVal = editingVariantValue.trim();
+      
+      if (oldVal !== newVal) {
+        const newList = [...variantList];
+        newList[editingVariantIndex] = newVal;
+        setVariantList(newList);
+        
+        const originalName = Object.keys(variantMapping).find(key => variantMapping[key] === oldVal) || oldVal;
+        setVariantMapping(prev => ({ ...prev, [originalName]: newVal }));
+      }
+      
+      setEditingVariantIndex(null);
+      setEditingVariantValue('');
+    }
+  };
+
+  const [syncWithOrders, setSyncWithOrders] = useState(true);
+
+  const handleSave = async () => {
+    if (!name || !price) {
+      showToast('請填寫名稱與金額', 'error');
+      return;
+    }
+    await onSave({
+      id: machine.id,
+      name,
+      defaultPrice: parseInt(price),
+      variants: variantList,
+      imageUrl: uploadedImage
+    }, machine.name, variantMapping, syncWithOrders);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[110] bg-black/50 flex items-center justify-center p-4">
+      <div className="bg-background w-full max-w-2xl rounded-3xl shadow-2xl flex flex-col max-h-[90vh]">
+        <div className="p-6 border-b border-divider flex justify-between items-center bg-card-white rounded-t-3xl">
+          <h3 className="text-xl font-bold text-ink">編輯機台: {machine.name}</h3>
+          <button onClick={onClose} className="p-2 hover:bg-background rounded-full transition-colors">
+            <X className="w-6 h-6 text-ink/40" />
+          </button>
+        </div>
+        
+        <div className="p-6 overflow-y-auto flex-1 space-y-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="text-xs font-bold text-ink/40 block mb-2 uppercase tracking-widest">機台名稱</label>
+              <input 
+                type="text" 
+                className="w-full px-4 py-3 bg-card-white rounded-2xl border border-divider"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="text-xs font-bold text-ink/40 block mb-2 uppercase tracking-widest">預設日幣金額</label>
+              <input 
+                type="number" 
+                className="w-full px-4 py-3 bg-card-white rounded-2xl border border-divider"
+                value={price}
+                onChange={(e) => setPrice(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div>
+            <div className="flex justify-between items-center mb-2">
+              <label className="text-xs font-bold text-ink/40 uppercase tracking-widest">機台圖片</label>
+              <div>
+                <input 
+                  type="file" 
+                  accept="image/*" 
+                  className="hidden" 
+                  ref={fileInputRef}
+                  onChange={handleImageUpload}
+                />
                 <button 
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onCopyNotification(customer);
-                  }}
-                  className="p-2 text-primary-blue hover:bg-primary-blue/10 rounded-xl transition-colors"
-                  title="複製通知"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-3 py-1.5 bg-primary-blue/10 text-primary-blue rounded-xl text-xs font-bold flex items-center gap-1 hover:bg-primary-blue/20 transition-colors"
                 >
-                  <Copy className="w-4 h-4" />
+                  <Upload className="w-3 h-3" />
+                  上傳圖片
                 </button>
+              </div>
+            </div>
+            {uploadedImage ? (
+              <div className="relative group">
+                <div className="w-full h-48 rounded-2xl overflow-hidden bg-card-white border border-divider">
+                  <img src={uploadedImage} alt="Machine" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+                </div>
                 <button 
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setConfirmModal({
-                      show: true,
-                      title: '刪除顧客',
-                      message: `確定要刪除顧客 ${customer.name} 嗎？這將不會刪除其訂單紀錄。`,
-                      type: 'danger',
-                      onConfirm: async () => {
-                        try {
-                          await deleteDoc(doc(db, 'customers', customer.id));
-                          showToast('顧客已刪除');
-                        } catch (err) {
-                          handleFirestoreError(err, OperationType.DELETE, `customers/${customer.id}`);
-                        }
-                      }
-                    });
-                  }}
-                  className="p-2 text-ink/20 hover:text-red-500 hover:bg-red-50 rounded-xl transition-colors"
-                  title="刪除顧客"
+                  onClick={() => setUploadedImage(null)}
+                  className="absolute top-2 right-2 p-2 bg-white/80 hover:bg-white rounded-full shadow-sm text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
               </div>
+            ) : (
+              <div 
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full h-32 rounded-2xl border-2 border-dashed border-divider flex flex-col items-center justify-center text-ink/30 cursor-pointer hover:bg-card-white hover:border-primary-blue/30 transition-colors"
+              >
+                <Package className="w-8 h-8 mb-2 opacity-50" />
+                <span className="text-sm font-bold">點擊上傳或貼上圖片</span>
+              </div>
+            )}
+          </div>
+
+          <div>
+            <label className="text-xs font-bold text-ink/40 block mb-2 uppercase tracking-widest">款式管理</label>
+            <div className="flex flex-wrap gap-2 mb-3">
+              {variantList.map((v, index) => (
+                <div key={index} className="relative group">
+                  {editingVariantIndex === index ? (
+                    <input
+                      autoFocus
+                      type="text"
+                      className="px-3 py-1.5 bg-card-white border border-primary-blue rounded-xl text-sm font-bold w-32 outline-none"
+                      value={editingVariantValue}
+                      onChange={(e) => setEditingVariantValue(e.target.value)}
+                      onBlur={saveEditedVariant}
+                      onKeyDown={(e) => e.key === 'Enter' && saveEditedVariant()}
+                    />
+                  ) : (
+                    <span 
+                      onClick={() => startEditingVariant(index, v)}
+                      className="flex items-center gap-1 px-3 py-1.5 bg-primary-blue/10 text-primary-blue rounded-xl text-sm font-bold cursor-pointer hover:bg-primary-blue/20 transition-colors"
+                    >
+                      {v}
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeVariant(v);
+                        }} 
+                        className="hover:text-red-500 ml-1"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  )}
+                </div>
+              ))}
+              {variantList.length === 0 && <p className="text-xs text-ink/30 italic">尚未新增款式</p>}
+            </div>
+            <div className="flex gap-2">
+              <input 
+                type="text" 
+                placeholder="輸入新款式名稱..." 
+                className="flex-1 px-4 py-3 bg-card-white rounded-xl border border-divider text-sm"
+                value={newVariant}
+                onChange={(e) => setNewVariant(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && addVariant()}
+              />
+              <button 
+                onClick={addVariant}
+                className="px-4 py-3 bg-ink text-white rounded-xl text-sm font-bold"
+              >
+                新增
+              </button>
             </div>
           </div>
-        ))}
+        </div>
+
+        <div className="p-6 border-t border-divider bg-card-white rounded-b-3xl flex justify-between">
+          <button 
+            onClick={() => onDelete(machine.id, machine.name)}
+            className="px-6 py-3 text-red-500 font-bold hover:bg-red-50 rounded-xl transition-colors"
+          >
+            刪除機台
+          </button>
+          <div className="flex gap-3">
+            <button 
+              onClick={onClose}
+              className="px-6 py-3 text-ink/60 font-bold hover:bg-background rounded-xl transition-colors"
+            >
+              取消
+            </button>
+            <button 
+              onClick={handleSave}
+              className="px-6 py-3 bg-primary-blue text-white rounded-xl font-bold hover:bg-blue-600 transition-colors"
+            >
+              儲存{syncWithOrders ? '並同步訂單' : ''}
+            </button>
+          </div>
+        </div>
+
+        <div className="px-6 pb-6 flex items-center gap-3">
+          <label className="flex items-center gap-2 cursor-pointer group">
+            <div className="relative flex items-center justify-center w-5 h-5 rounded border-2 border-ink/20 group-hover:border-primary-blue transition-colors">
+              <input 
+                type="checkbox" 
+                className="absolute opacity-0 w-full h-full cursor-pointer peer"
+                checked={syncWithOrders}
+                onChange={(e) => setSyncWithOrders(e.target.checked)}
+              />
+              <CheckCircle2 className="w-3.5 h-3.5 text-primary-blue opacity-0 peer-checked:opacity-100 transition-opacity" />
+            </div>
+            <span className="text-xs font-bold text-ink/40 group-hover:text-ink/60 transition-colors">同步更新現有訂單資料</span>
+          </label>
+        </div>
       </div>
     </div>
   );
@@ -1227,14 +1785,16 @@ const MachineManagement = ({
   customers,
   settings,
   showToast,
-  setConfirmModal
+  setConfirmModal,
+  setEditingMachine
 }: { 
   machines: any[], 
   orders: Order[],
   customers: Customer[],
   settings: SystemSettings | null,
   showToast: (m: string, t?: 'success' | 'error') => void,
-  setConfirmModal: (m: any) => void
+  setConfirmModal: (m: any) => void,
+  setEditingMachine: (m: any) => void
 }) => {
   const [name, setName] = useState('');
   const [price, setPrice] = useState('');
@@ -1242,9 +1802,7 @@ const MachineManagement = ({
   const [newVariant, setNewVariant] = useState('');
   const [editingVariantIndex, setEditingVariantIndex] = useState<number | null>(null);
   const [editingVariantValue, setEditingVariantValue] = useState('');
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [oldName, setOldName] = useState<string | null>(null);
-  const [variantMapping, setVariantMapping] = useState<Record<string, string>>({});
+  const [viewMode, setViewMode] = useState<'list' | 'grid-sm' | 'grid-lg'>('list');
 
   // Derive all unique machine names from orders
   const machineNamesFromOrders = Array.from(new Set(orders.flatMap(o => o.items.map(i => i.machineName))));
@@ -1312,7 +1870,7 @@ const MachineManagement = ({
     });
   };
 
-  const saveMachine = async () => {
+  const saveNewMachine = async () => {
     if (!name || !price) {
       showToast('請填寫名稱與金額', 'error');
       return;
@@ -1322,85 +1880,22 @@ const MachineManagement = ({
       name,
       defaultPrice: parseInt(price),
       variants: variantList,
+      createdAt: now,
       updatedAt: now
     };
 
     try {
-      const batch = writeBatch(db);
-      
-      // Find if we already have a doc for this name
       const existingMachine = machines.find(m => m.name === name);
-      const docId = editingId || existingMachine?.id;
-
-      if (docId) {
-        batch.update(doc(db, 'machines', docId), data);
-      } else {
-        const newDocRef = doc(collection(db, 'machines'));
-        batch.set(newDocRef, { ...data, createdAt: now });
+      if (existingMachine) {
+        showToast('此機台名稱已存在', 'error');
+        return;
       }
-
-      // Sync with orders if name changed or if explicitly requested (implied by user)
-      // We'll update all orders that have the oldName (if it was an edit) or the current name
-      const nameToMatch = oldName || name;
-      const affectedOrders = orders.filter(o => o.items.some(i => i.machineName === nameToMatch));
-      
-      const customerDiffs: Record<string, number> = {};
-
-      affectedOrders.forEach(order => {
-        let changed = false;
-        const newItems = order.items.map(item => {
-          if (item.machineName === nameToMatch) {
-            changed = true;
-            const itemPrice = (settings?.priceMap?.[data.defaultPrice] || DEFAULT_PRICE_MAP[data.defaultPrice] || 0) + (item.variant?.includes('(環保)') ? 10 : 0);
-            
-            // Handle variant renaming
-            let newVariantName = item.variant;
-            if (item.variant) {
-              const isEco = item.variant.includes('(環保)');
-              const baseVariant = item.variant.replace(' (環保)', '').replace('(環保)', '').trim();
-              if (variantMapping[baseVariant]) {
-                newVariantName = variantMapping[baseVariant] + (isEco ? ' (環保)' : '');
-              }
-            }
-
-            return { 
-              ...item, 
-              machineName: name,
-              price: itemPrice,
-              variant: newVariantName,
-              subtotal: itemPrice * item.quantity
-            };
-          }
-          return item;
-        });
-        
-        if (changed) {
-          const newTotalAmount = newItems.reduce((sum, i) => sum + i.subtotal, 0);
-          const diff = newTotalAmount - order.totalAmount;
-          if (diff !== 0) {
-            customerDiffs[order.customerId] = (customerDiffs[order.customerId] || 0) + diff;
-          }
-          batch.update(doc(db, 'orders', order.id), { 
-            items: newItems,
-            totalAmount: newTotalAmount,
-            customerName: order.customerName, // Keep snapshot consistent
-            updatedAt: now
-          });
-        }
-      });
-
-      // Update customers
-      Object.entries(customerDiffs).forEach(([customerId, diff]) => {
-        batch.update(doc(db, 'customers', customerId), {
-          totalSpent: increment(diff)
-        });
-      });
-
-      await batch.commit();
-      showToast(docId ? '機台設定與訂單已同步更新' : '機台設定已儲存');
+      const newDocRef = doc(collection(db, 'machines'));
+      await setDoc(newDocRef, data);
+      showToast('機台新增成功');
       reset();
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, 'machines_sync');
+      handleFirestoreError(err, OperationType.WRITE, 'machines_create');
     }
   };
 
@@ -1411,9 +1906,6 @@ const MachineManagement = ({
     setNewVariant('');
     setEditingVariantIndex(null);
     setEditingVariantValue('');
-    setEditingId(null);
-    setOldName(null);
-    setVariantMapping({});
   };
 
   const addVariant = () => {
@@ -1441,12 +1933,6 @@ const MachineManagement = ({
         const newList = [...variantList];
         newList[editingVariantIndex] = newVal;
         setVariantList(newList);
-        
-        // Track the rename for syncing later
-        // If we already had a mapping for this oldVal (e.g. A -> B), and now we do B -> C
-        // We want to update the original mapping to A -> C
-        const originalName = Object.keys(variantMapping).find(key => variantMapping[key] === oldVal) || oldVal;
-        setVariantMapping(prev => ({ ...prev, [originalName]: newVal }));
       }
       
       setEditingVariantIndex(null);
@@ -1458,7 +1944,7 @@ const MachineManagement = ({
     <div className="space-y-6">
       <div className="bg-card-white p-6 rounded-3xl card-shadow">
         <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest mb-4">
-          {editingId ? `編輯機台: ${name}` : '機台設定'}
+          新增機台
         </h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
           <input 
@@ -1533,12 +2019,12 @@ const MachineManagement = ({
 
         <div className="flex gap-2">
           <button 
-            onClick={saveMachine}
+            onClick={saveNewMachine}
             className="flex-1 py-4 bg-primary-blue text-white rounded-2xl font-bold"
           >
-            儲存並同步訂單
+            儲存機台
           </button>
-          {(editingId || name || price || variantList.length > 0) && (
+          {(name || price || variantList.length > 0) && (
             <button 
               onClick={reset}
               className="px-6 py-4 bg-background text-ink rounded-2xl font-bold"
@@ -1551,109 +2037,121 @@ const MachineManagement = ({
 
       <div className="flex justify-between items-center">
         <h3 className="text-lg font-bold text-ink">機台列表</h3>
-        <button 
-          onClick={autoInitializeUnsetMachines}
-          className="px-4 py-2 bg-orange-500 text-white rounded-xl text-sm font-bold flex items-center gap-2 hover:bg-orange-600 transition-colors"
-        >
-          <RefreshCw className="w-4 h-4" />
-          一鍵初始化未設定
-        </button>
+        <div className="flex items-center gap-2">
+          <div className="flex bg-background rounded-xl p-1">
+            <button onClick={() => setViewMode('list')} className={cn("p-2 rounded-lg transition-colors", viewMode === 'list' ? "bg-white shadow-sm" : "text-ink/40 hover:text-ink")}>
+              <List className="w-4 h-4" />
+            </button>
+            <button onClick={() => setViewMode('grid-sm')} className={cn("p-2 rounded-lg transition-colors", viewMode === 'grid-sm' ? "bg-white shadow-sm" : "text-ink/40 hover:text-ink")}>
+              <Grid2x2 className="w-4 h-4" />
+            </button>
+            <button onClick={() => setViewMode('grid-lg')} className={cn("p-2 rounded-lg transition-colors", viewMode === 'grid-lg' ? "bg-white shadow-sm" : "text-ink/40 hover:text-ink")}>
+              <LayoutGrid className="w-4 h-4" />
+            </button>
+          </div>
+          <button 
+            onClick={autoInitializeUnsetMachines}
+            className="px-4 py-2 bg-orange-500 text-white rounded-xl text-sm font-bold flex items-center gap-2 hover:bg-orange-600 transition-colors"
+          >
+            <RefreshCw className="w-4 h-4" />
+            <span className="hidden sm:inline">一鍵初始化未設定</span>
+          </button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div className={cn(
+        "grid gap-4",
+        viewMode === 'list' ? "grid-cols-1 sm:grid-cols-2" : 
+        viewMode === 'grid-sm' ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5" : 
+        "grid-cols-1 sm:grid-cols-2 md:grid-cols-3"
+      )}>
         {allMachineNames.map(machineName => {
           const config = machines.find(m => m.name === machineName);
           return (
             <div 
               key={machineName} 
               onClick={() => {
-                setName(machineName);
-                setOldName(machineName);
                 if (config) {
-                  setEditingId(config.id);
-                  setPrice(config.defaultPrice.toString());
-                  setVariantList(config.variants);
+                  setEditingMachine(config);
                 } else {
-                  setEditingId(null);
-                  
                   // Try to guess JPY price from last order
+                  let guessedPrice = '';
                   const lastOrderWithMachine = orders.find(o => o.items.some(i => i.machineName === machineName));
                   if (lastOrderWithMachine) {
                     const item = lastOrderWithMachine.items.find(i => i.machineName === machineName);
                     if (item) {
                       const ntPrice = item.price;
                       const map = settings?.priceMap || DEFAULT_PRICE_MAP;
-                      // Try exact match or match minus eco fee
                       const guessedJpy = Object.keys(map).find(k => map[parseInt(k)] === ntPrice) || 
                                         Object.keys(map).find(k => map[parseInt(k)] === ntPrice - 10);
-                      if (guessedJpy) setPrice(guessedJpy);
-                      else setPrice('');
-                    } else {
-                      setPrice('');
+                      if (guessedJpy) guessedPrice = guessedJpy;
                     }
-                  } else {
-                    setPrice('');
                   }
 
                   // Try to find variants from orders for this machine
                   const variantsFromOrders = Array.from(new Set(
                     orders.flatMap(o => o.items.filter(i => i.machineName === machineName).map(i => i.variant || ''))
                   )).filter(v => v && !v.includes('(環保)'));
-                  setVariantList(variantsFromOrders);
+                  
+                  setEditingMachine({
+                    id: '',
+                    name: machineName,
+                    defaultPrice: guessedPrice ? parseInt(guessedPrice) : 0,
+                    variants: variantsFromOrders,
+                    imageUrl: null
+                  });
                 }
               }}
               className={cn(
-                "bg-card-white p-6 rounded-3xl card-shadow flex justify-between items-start cursor-pointer transition-all hover:scale-[1.02]",
-                config ? "border-l-4 border-primary-blue" : "border-l-4 border-dashed border-ink/10"
+                "bg-card-white rounded-3xl card-shadow flex cursor-pointer transition-all hover:scale-[1.02] overflow-hidden relative group",
+                config ? "border-l-4 border-primary-blue" : "border-l-4 border-dashed border-ink/10",
+                viewMode === 'list' ? "p-6 justify-between items-start" : "flex-col"
               )}
             >
-              <div className="flex-1 flex gap-4">
-                <div className="w-12 h-12 bg-background rounded-2xl flex items-center justify-center overflow-hidden flex-shrink-0">
-                  <Package className="w-6 h-6 text-ink/20" />
+              {viewMode !== 'list' && (
+                <div className={cn(
+                  "w-full bg-background flex items-center justify-center overflow-hidden",
+                  viewMode === 'grid-sm' ? "h-24" : "h-48"
+                )}>
+                  {config?.imageUrl ? (
+                    <img src={config.imageUrl} alt={machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                  ) : (
+                    <Package className="w-8 h-8 text-ink/10" />
+                  )}
                 </div>
+              )}
+              
+              <div className={cn("flex-1 flex", viewMode === 'list' ? "gap-4" : "p-4 flex-col gap-2")}>
+                {viewMode === 'list' && (
+                  <div className="w-12 h-12 bg-background rounded-2xl flex items-center justify-center overflow-hidden flex-shrink-0">
+                    {config?.imageUrl ? (
+                      <img src={config.imageUrl} alt={machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                    ) : (
+                      <Package className="w-6 h-6 text-ink/20" />
+                    )}
+                  </div>
+                )}
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
-                    <h4 className="font-bold text-ink">{machineName}</h4>
-                    {!config && <span className="text-[10px] bg-ink/5 text-ink/40 px-1.5 py-0.5 rounded">未設定</span>}
+                    <h4 className={cn("font-bold text-ink truncate", viewMode === 'grid-sm' ? "text-xs" : "text-base")} title={machineName}>{machineName}</h4>
+                    {!config && <span className="text-[10px] bg-ink/5 text-ink/40 px-1.5 py-0.5 rounded flex-shrink-0">未設定</span>}
                   </div>
                   {config ? (
                     <>
                       <p className="text-xs text-ink/40 mb-2">預設金額: ¥{config.defaultPrice}</p>
-                      <div className="flex flex-wrap gap-1">
-                        {config.variants.map((v: string) => (
-                          <span key={v} className="px-2 py-1 bg-background rounded text-[10px] font-bold text-ink/60">{v}</span>
-                        ))}
-                      </div>
+                      {viewMode !== 'grid-sm' && (
+                        <div className="flex flex-wrap gap-1">
+                          {config.variants.map((v: string) => (
+                            <span key={v} className="px-2 py-1 bg-background rounded text-[10px] font-bold text-ink/60">{v}</span>
+                          ))}
+                        </div>
+                      )}
                     </>
                   ) : (
-                    <p className="text-xs text-ink/30 italic">點擊以設定預設金額與款式</p>
+                    viewMode !== 'grid-sm' && <p className="text-xs text-ink/30 italic">點擊以設定預設金額與款式</p>
                   )}
                 </div>
               </div>
-              {config && (
-                <button 
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setConfirmModal({
-                      show: true,
-                      title: '刪除機台',
-                      message: `確定要刪除機台 ${machineName} 的設定嗎？`,
-                      type: 'danger',
-                      onConfirm: async () => {
-                        try {
-                          await deleteDoc(doc(db, 'machines', config.id));
-                          showToast('機台設定已刪除');
-                        } catch (err) {
-                          handleFirestoreError(err, OperationType.DELETE, `machines/${config.id}`);
-                        }
-                      }
-                    });
-                  }}
-                  className="p-2 text-ink/20 hover:text-red-500 transition-colors"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              )}
             </div>
           );
         })}
@@ -1672,7 +2170,8 @@ const CustomerDetailView = ({
   onClose, 
   showToast,
   onCopyNotification,
-  setConfirmModal
+  setConfirmModal,
+  setEditingMachine
 }: { 
   customer: Customer, 
   orders: Order[], 
@@ -1683,7 +2182,8 @@ const CustomerDetailView = ({
   onClose: () => void, 
   showToast: (m: string, t?: 'success' | 'error') => void,
   onCopyNotification: () => void,
-  setConfirmModal: (m: any) => void
+  setConfirmModal: (m: any) => void,
+  setEditingMachine: (m: any) => void
 }) => {
   const customerOrders = orders.filter(o => o.customerId === customer.id);
   const [editingItem, setEditingItem] = useState<{ orderId: string, item: OrderItem } | null>(null);
@@ -1902,7 +2402,7 @@ const CustomerDetailView = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-background flex flex-col">
+    <div className="fixed inset-0 z-0 bg-background flex flex-col">
       <header className="p-6 border-b border-divider flex items-center justify-between">
         <div className="flex items-center gap-4">
           <button onClick={onClose} className="p-2 bg-card-white rounded-xl shadow-sm">
@@ -1972,11 +2472,47 @@ const CustomerDetailView = ({
                   <div key={item.id} className="flex flex-col gap-2 p-4 bg-background rounded-2xl relative group">
                     <div className="flex justify-between items-start">
                       <div className="flex gap-3">
-                        <div className="w-10 h-10 bg-card-white rounded-xl flex items-center justify-center overflow-hidden flex-shrink-0 shadow-sm">
-                          <Package className="w-5 h-5 text-ink/20" />
+                        <div 
+                          className="w-10 h-10 bg-card-white rounded-xl flex items-center justify-center overflow-hidden flex-shrink-0 shadow-sm cursor-pointer hover:opacity-80 transition-opacity"
+                          onClick={() => {
+                            if (machine) {
+                              setEditingMachine(machine);
+                            } else {
+                              setEditingMachine({
+                                id: '',
+                                name: item.machineName,
+                                defaultPrice: 0,
+                                variants: [],
+                                imageUrl: null
+                              });
+                            }
+                          }}
+                        >
+                          {machine?.imageUrl ? (
+                            <img src={machine.imageUrl} alt={item.machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                          ) : (
+                            <Package className="w-5 h-5 text-ink/20" />
+                          )}
                         </div>
                         <div>
-                          <p className="font-bold text-ink">{item.machineName}</p>
+                          <p 
+                            className="font-bold text-ink cursor-pointer hover:text-primary-blue transition-colors"
+                            onClick={() => {
+                              if (machine) {
+                                setEditingMachine(machine);
+                              } else {
+                                setEditingMachine({
+                                  id: '',
+                                  name: item.machineName,
+                                  defaultPrice: 0,
+                                  variants: [],
+                                  imageUrl: null
+                                });
+                              }
+                            }}
+                          >
+                            {item.machineName}
+                          </p>
                           <div className="flex items-center gap-2">
                             <p className="text-xs text-ink/40">{item.variant || '無款式'}</p>
                             <span className="text-[10px] text-ink/20">•</span>
@@ -2826,6 +3362,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('create');
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+  const [editingMachine, setEditingMachine] = useState<any | null>(null);
   
   // Data State
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -2841,7 +3378,8 @@ export default function App() {
     show: boolean;
     title: string;
     message: string;
-    onConfirm: () => void;
+    checkboxLabel?: string;
+    onConfirm: (checked?: boolean) => void;
     type: 'danger' | 'info';
   }>({
     show: false,
@@ -2856,6 +3394,147 @@ export default function App() {
     type: 'success'
   });
   const printRef = useRef<HTMLDivElement>(null);
+
+  const handleSaveEditedMachine = async (data: any, oldName: string, variantMapping: Record<string, string>, syncWithOrders: boolean = true) => {
+    const now = new Date().toISOString();
+    const updateData = {
+      name: data.name,
+      defaultPrice: data.defaultPrice,
+      variants: data.variants,
+      imageUrl: data.imageUrl,
+      updatedAt: now
+    };
+
+    try {
+      const batch = writeBatch(db);
+      
+      if (data.id) {
+        batch.update(doc(db, 'machines', data.id), updateData);
+      } else {
+        const newDocRef = doc(collection(db, 'machines'));
+        batch.set(newDocRef, { ...updateData, createdAt: now });
+      }
+
+      if (syncWithOrders) {
+        const nameToMatch = oldName || data.name;
+        const affectedOrders = orders.filter(o => o.items.some(i => i.machineName === nameToMatch));
+        
+        const customerDiffs: Record<string, number> = {};
+
+        affectedOrders.forEach(order => {
+          let changed = false;
+          const newItems = order.items.map(item => {
+            if (item.machineName === nameToMatch) {
+              changed = true;
+              const itemPrice = (settings?.priceMap?.[data.defaultPrice] || DEFAULT_PRICE_MAP[data.defaultPrice] || 0) + (item.variant?.includes('(環保)') ? 10 : 0);
+              
+              let newVariantName = item.variant;
+              if (item.variant) {
+                const isEco = item.variant.includes('(環保)');
+                const baseVariant = item.variant.replace(' (環保)', '').replace('(環保)', '').trim();
+                if (variantMapping[baseVariant]) {
+                  newVariantName = variantMapping[baseVariant] + (isEco ? ' (環保)' : '');
+                }
+              }
+
+              return { 
+                ...item, 
+                machineName: data.name,
+                price: itemPrice,
+                variant: newVariantName,
+                subtotal: itemPrice * item.quantity
+              };
+            }
+            return item;
+          });
+          
+          if (changed) {
+            const newTotalAmount = newItems.reduce((sum, i) => sum + i.subtotal, 0);
+            const diff = newTotalAmount - order.totalAmount;
+            if (diff !== 0) {
+              customerDiffs[order.customerId] = (customerDiffs[order.customerId] || 0) + diff;
+            }
+            batch.update(doc(db, 'orders', order.id), { 
+              items: newItems,
+              totalAmount: newTotalAmount,
+              customerName: order.customerName,
+              updatedAt: now
+            });
+          }
+        });
+
+        Object.entries(customerDiffs).forEach(([customerId, diff]) => {
+          batch.update(doc(db, 'customers', customerId), {
+            totalSpent: increment(diff)
+          });
+        });
+      }
+
+      await batch.commit();
+      showToast(syncWithOrders ? '機台設定與訂單已同步更新' : '機台設定已儲存');
+      setEditingMachine(null);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'machines_sync');
+    }
+  };
+
+  const handleDeleteMachine = (machineId: string, machineName: string) => {
+    setConfirmModal({
+      show: true,
+      title: '刪除機台',
+      message: `確定要刪除「${machineName}」嗎？`,
+      checkboxLabel: '同時刪除包含此機台的所有訂單',
+      type: 'danger',
+      onConfirm: async (checked?: boolean) => {
+        try {
+          const batch = writeBatch(db);
+          batch.delete(doc(db, 'machines', machineId));
+
+          if (checked) {
+            const affectedOrders = orders.filter(o => o.items.some(i => i.machineName === machineName));
+            const customerDiffs: Record<string, { spent: number, items: number }> = {};
+
+            affectedOrders.forEach(order => {
+              const isOnlyItem = order.items.every(i => i.machineName === machineName);
+              if (isOnlyItem) {
+                batch.delete(doc(db, 'orders', order.id));
+                customerDiffs[order.customerId] = customerDiffs[order.customerId] || { spent: 0, items: 0 };
+                customerDiffs[order.customerId].spent -= order.totalAmount;
+                customerDiffs[order.customerId].items -= order.items.reduce((s, i) => s + i.quantity, 0);
+              } else {
+                const newItems = order.items.filter(i => i.machineName !== machineName);
+                const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
+                const diffSpent = newTotal - order.totalAmount;
+                const diffItems = newItems.reduce((s, i) => s + i.quantity, 0) - order.items.reduce((s, i) => s + i.quantity, 0);
+                
+                batch.update(doc(db, 'orders', order.id), {
+                  items: newItems,
+                  totalAmount: newTotal
+                });
+
+                customerDiffs[order.customerId] = customerDiffs[order.customerId] || { spent: 0, items: 0 };
+                customerDiffs[order.customerId].spent += diffSpent;
+                customerDiffs[order.customerId].items += diffItems;
+              }
+            });
+
+            Object.entries(customerDiffs).forEach(([customerId, diffs]) => {
+              batch.update(doc(db, 'customers', customerId), {
+                totalSpent: increment(diffs.spent),
+                totalItems: increment(diffs.items)
+              });
+            });
+          }
+
+          await batch.commit();
+          showToast('機台已刪除');
+          setEditingMachine(null);
+        } catch (err) {
+          handleFirestoreError(err, OperationType.DELETE, `machines/${machineId}`);
+        }
+      }
+    });
+  };
 
   useEffect(() => {
     if (selectedCustomer) {
@@ -3097,6 +3776,7 @@ ${settings.notificationTemplate}`;
                   machines={machines}
                   setConfirmModal={setConfirmModal} 
                   showToast={showToast} 
+                  setEditingMachine={setEditingMachine}
                 />
               )}
               {activeTab === 'customers' && (
@@ -3117,6 +3797,7 @@ ${settings.notificationTemplate}`;
                   settings={settings}
                   showToast={showToast} 
                   setConfirmModal={setConfirmModal}
+                  setEditingMachine={setEditingMachine}
                 />
               )}
               {activeTab === 'print' && (
@@ -3170,15 +3851,31 @@ ${settings.notificationTemplate}`;
                 showToast={showToast}
                 onCopyNotification={() => copyCustomerNotification(selectedCustomer)}
                 setConfirmModal={setConfirmModal}
+                setEditingMachine={setEditingMachine}
               />
             </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Machine Edit Modal */}
+        <AnimatePresence>
+          {editingMachine && (
+            <MachineEditModal 
+              machine={editingMachine}
+              onClose={() => setEditingMachine(null)}
+              onSave={handleSaveEditedMachine}
+              onDelete={handleDeleteMachine}
+              orders={orders}
+              settings={settings}
+              showToast={showToast}
+            />
           )}
         </AnimatePresence>
 
         {/* Confirmation Modal */}
         <AnimatePresence>
           {confirmModal.show && (
-            <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-ink/40 backdrop-blur-sm">
+            <div className="fixed inset-0 z-[120] flex items-center justify-center p-6 bg-ink/40 backdrop-blur-sm">
               <motion.div 
                 initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
@@ -3186,7 +3883,22 @@ ${settings.notificationTemplate}`;
                 className="bg-card-white w-full max-w-sm p-8 rounded-3xl card-shadow"
               >
                 <h3 className="text-xl font-bold text-ink mb-4">{confirmModal.title}</h3>
-                <p className="text-ink/60 mb-8 leading-relaxed">{confirmModal.message}</p>
+                <p className="text-ink/60 mb-6 leading-relaxed">{confirmModal.message}</p>
+                
+                {confirmModal.checkboxLabel && (
+                  <label className="flex items-center gap-3 mb-8 cursor-pointer group">
+                    <div className="relative flex items-center justify-center w-6 h-6 rounded-lg border-2 border-ink/20 group-hover:border-primary-blue transition-colors">
+                      <input 
+                        type="checkbox" 
+                        className="absolute opacity-0 w-full h-full cursor-pointer peer"
+                        id="confirm-checkbox"
+                      />
+                      <CheckCircle2 className="w-4 h-4 text-primary-blue opacity-0 peer-checked:opacity-100 transition-opacity" />
+                    </div>
+                    <span className="text-sm font-bold text-ink/70 group-hover:text-ink transition-colors">{confirmModal.checkboxLabel}</span>
+                  </label>
+                )}
+
                 <div className="flex gap-3">
                   <button 
                     onClick={() => setConfirmModal(m => ({ ...m, show: false }))}
@@ -3196,7 +3908,8 @@ ${settings.notificationTemplate}`;
                   </button>
                   <button 
                     onClick={() => {
-                      confirmModal.onConfirm();
+                      const checkbox = document.getElementById('confirm-checkbox') as HTMLInputElement;
+                      confirmModal.onConfirm(checkbox?.checked);
                       setConfirmModal(m => ({ ...m, show: false }));
                     }}
                     className={cn(
@@ -3220,7 +3933,7 @@ ${settings.notificationTemplate}`;
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 50 }}
               className={cn(
-                "fixed bottom-28 left-1/2 -translate-x-1/2 z-[100] px-6 py-3 rounded-full font-bold text-white shadow-xl flex items-center gap-2",
+                "fixed bottom-28 left-1/2 -translate-x-1/2 z-[130] px-6 py-3 rounded-full font-bold text-white shadow-xl flex items-center gap-2",
                 toast.type === 'success' ? "bg-green-500" : "bg-red-500"
               )}
             >

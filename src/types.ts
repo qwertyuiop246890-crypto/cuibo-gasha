@@ -28,6 +28,7 @@ export interface Machine {
   name: string;
   defaultPrice: number;
   variants: string[];
+  imageUrl?: string;
   createdAt: string;
   updatedAt: string;
 }
