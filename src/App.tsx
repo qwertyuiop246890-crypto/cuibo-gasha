@@ -5,7 +5,7 @@ import {
   LogOut, ChevronRight, CheckCircle2, AlertCircle, X,
   ArrowLeft, Save, RefreshCw, TrendingUp, MessageSquare,
   Coins, ArrowRight, Database, Home, ArrowRightLeft, UserPlus,
-  Grid2x2, LayoutGrid
+  Grid2x2, LayoutGrid, Edit2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -2192,6 +2192,44 @@ const CustomerDetailView = ({
   const [targetCustomerName, setTargetCustomerName] = useState('');
   const [releasingItem, setReleasingItem] = useState<{ orderId: string, item: OrderItem } | null>(null);
   const [releaseQuantity, setReleaseQuantity] = useState(1);
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [editedName, setEditedName] = useState(customer.name);
+
+  const handleSaveName = async () => {
+    const newName = editedName.trim();
+    if (!newName) {
+      showToast('顧客名稱不能為空', 'error');
+      return;
+    }
+    if (newName === customer.name) {
+      setIsEditingName(false);
+      return;
+    }
+
+    try {
+      const batch = writeBatch(db);
+      
+      // Update customer doc
+      batch.update(doc(db, 'customers', customer.id), { name: newName });
+      
+      // Update all orders for this customer
+      customerOrders.forEach(order => {
+        batch.update(doc(db, 'orders', order.id), { customerName: newName });
+      });
+
+      // Update all releases for this customer
+      const customerReleases = releases.filter(r => r.customerName === customer.name);
+      customerReleases.forEach(release => {
+        batch.update(doc(db, 'releases', release.id), { customerName: newName });
+      });
+
+      await batch.commit();
+      showToast('顧客名稱已更新');
+      setIsEditingName(false);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `customers/${customer.id}`);
+    }
+  };
 
   const handleRecalculateStats = async () => {
     try {
@@ -2409,7 +2447,34 @@ const CustomerDetailView = ({
             <ArrowLeft className="w-5 h-5" />
           </button>
           <div>
-            <h2 className="text-xl font-bold text-ink">{customer.name}</h2>
+            {isEditingName ? (
+              <div className="flex items-center gap-2 mb-1">
+                <input 
+                  type="text" 
+                  value={editedName} 
+                  onChange={(e) => setEditedName(e.target.value)}
+                  className="px-3 py-1 border border-divider rounded-lg text-xl font-bold text-ink w-48 bg-card-white"
+                  autoFocus
+                />
+                <button onClick={handleSaveName} className="p-1.5 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-colors">
+                  <CheckCircle2 className="w-4 h-4" />
+                </button>
+                <button onClick={() => { setIsEditingName(false); setEditedName(customer.name); }} className="p-1.5 bg-gray-200 text-ink rounded-lg hover:bg-gray-300 transition-colors">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <h2 className="text-xl font-bold text-ink">{customer.name}</h2>
+                <button 
+                  onClick={() => { setIsEditingName(true); setEditedName(customer.name); }}
+                  className="p-1 text-ink/40 hover:text-primary-blue transition-colors"
+                  title="編輯顧客名稱"
+                >
+                  <Edit2 className="w-4 h-4" />
+                </button>
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <p className="text-xs text-ink/40">消費總額: NT${customer.totalSpent} • 總顆數: {customer.totalItems || 0}</p>
               <button 
