@@ -732,7 +732,7 @@ const CreateOrder = ({
         setMachineName('');
         setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
         setUploadedImage(null);
-        setActiveTab('orders');
+        setActiveTab('create');
       }
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'submitOrder');
@@ -947,7 +947,7 @@ const CreateOrder = ({
             className="p-4 bg-blue-500 text-white rounded-2xl text-center transition-all active:scale-95 shadow-lg shadow-blue-500/20"
           >
             <p className="font-bold text-sm">全新加單</p>
-            <p className="text-[10px] opacity-80">(清空全部/返回清單)</p>
+            <p className="text-[10px] opacity-80">(清空全部/留在首頁)</p>
           </button>
         </div>
       </div>
