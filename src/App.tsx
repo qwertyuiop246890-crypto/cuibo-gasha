@@ -5,7 +5,7 @@ import {
   LogOut, ChevronRight, CheckCircle2, AlertCircle, X,
   ArrowLeft, Save, RefreshCw, TrendingUp, MessageSquare,
   Coins, ArrowRight, Database, Home, ArrowRightLeft, UserPlus,
-  Grid2x2, LayoutGrid, Edit2
+  Grid2x2, LayoutGrid, Edit2, Calendar
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -2974,8 +2974,27 @@ const Dashboard = ({
   releases: any[], 
   showToast: (m: string, t?: 'success' | 'error') => void 
 }) => {
-  const totalRevenue = orders.reduce((sum, o) => sum + o.totalAmount, 0);
-  const totalItems = orders.reduce((sum, o) => sum + o.items.reduce((s, i) => s + i.quantity, 0), 0);
+  const [startDate, setStartDate] = useState<string>('');
+  const [endDate, setEndDate] = useState<string>('');
+
+  const filteredOrders = orders.filter(o => {
+    if (!startDate && !endDate) return true;
+    const orderDate = new Date(o.createdAt);
+    if (startDate && new Date(startDate) > orderDate) return false;
+    if (endDate) {
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+      if (end < orderDate) return false;
+    }
+    return true;
+  });
+
+  const totalRevenue = filteredOrders.reduce((sum, o) => sum + o.totalAmount, 0);
+  const totalItems = filteredOrders.reduce((sum, o) => sum + o.items.reduce((s, i) => s + i.quantity, 0), 0);
+  const activeCustomersCount = startDate || endDate 
+    ? new Set(filteredOrders.map(o => o.customerId)).size
+    : customers.length;
+
   const pendingReleases = releases.filter(r => r.status === 'pending');
 
   const [transferringRelease, setTransferringRelease] = useState<any | null>(null);
@@ -3119,6 +3138,37 @@ const Dashboard = ({
 
   return (
     <div className="space-y-6 pb-24">
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-card-white p-4 rounded-2xl card-shadow">
+        <div className="flex items-center gap-2">
+          <Calendar className="w-5 h-5 text-ink/40" />
+          <span className="font-bold text-ink text-sm">日期區間篩選</span>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+          <input 
+            type="date" 
+            value={startDate}
+            onChange={(e) => setStartDate(e.target.value)}
+            className="px-3 py-2 bg-background rounded-xl border-none text-sm font-bold text-ink flex-1 sm:flex-none"
+          />
+          <span className="text-ink/40">-</span>
+          <input 
+            type="date" 
+            value={endDate}
+            onChange={(e) => setEndDate(e.target.value)}
+            className="px-3 py-2 bg-background rounded-xl border-none text-sm font-bold text-ink flex-1 sm:flex-none"
+          />
+          {(startDate || endDate) && (
+            <button 
+              onClick={() => { setStartDate(''); setEndDate(''); }}
+              className="p-2 text-ink/40 hover:text-red-500 transition-colors"
+              title="清除篩選"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="bg-orange-400 p-6 rounded-3xl text-white card-shadow">
           <p className="text-xs font-bold opacity-60 uppercase tracking-widest mb-1">預估營收</p>
@@ -3129,8 +3179,10 @@ const Dashboard = ({
           <p className="text-3xl font-bold">{totalItems}</p>
         </div>
         <div className="bg-primary-blue p-6 rounded-3xl text-white card-shadow">
-          <p className="text-xs font-bold opacity-60 uppercase tracking-widest mb-1">顧客總數</p>
-          <p className="text-3xl font-bold">{customers.length}</p>
+          <p className="text-xs font-bold opacity-60 uppercase tracking-widest mb-1">
+            {startDate || endDate ? '活躍顧客' : '顧客總數'}
+          </p>
+          <p className="text-3xl font-bold">{activeCustomersCount}</p>
         </div>
       </div>
 
@@ -3174,10 +3226,10 @@ const Dashboard = ({
         <div className="bg-card-white p-6 rounded-3xl card-shadow">
           <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest mb-6">熱門機台</h3>
           <div className="space-y-4">
-            {Array.from(new Set(orders.flatMap(o => o.items.map(i => i.machineName))))
+            {Array.from(new Set(filteredOrders.flatMap(o => o.items.map(i => i.machineName))))
               .map(name => ({
                 name,
-                count: orders.flatMap(o => o.items).filter(i => i.machineName === name).reduce((s, i) => s + i.quantity, 0)
+                count: filteredOrders.flatMap(o => o.items).filter(i => i.machineName === name).reduce((s, i) => s + i.quantity, 0)
               }))
               .sort((a, b) => b.count - a.count)
               .slice(0, 8)
