@@ -558,7 +558,7 @@ const CreateOrder = ({
   }, [machineName, machines, orders, settings]);
 
   const submitOrder = async (mode: 'same_cust' | 'same_item' | 'same_both' | 'new') => {
-    const trimmedName = customerName.trim();
+    const trimmedName = customerName.replace(/\s+/g, '');
     
     let totalAddedQuantity = 0;
     const newVariantsToSave = new Set<string>();
@@ -595,7 +595,7 @@ const CreateOrder = ({
 
       if (totalAddedQuantity > 0) {
         // 1. Find or Create Customer
-        let customer = customers.find(c => c.name.trim() === trimmedName);
+        let customer = customers.find(c => c.name.replace(/\s+/g, '') === trimmedName);
         customerId = customer?.id;
 
         if (!customer) {
@@ -2199,7 +2199,7 @@ const CustomerDetailView = ({
   const [editedName, setEditedName] = useState(customer.name);
 
   const handleSaveName = async () => {
-    const newName = editedName.trim();
+    const newName = editedName.replace(/\s+/g, '');
     if (!newName) {
       showToast('顧客名稱不能為空', 'error');
       return;
@@ -2288,18 +2288,18 @@ const CustomerDetailView = ({
   };
 
   const handleTransfer = async () => {
-    if (!transferringItem || !targetCustomerName.trim() || transferQuantity < 1) return;
+    if (!transferringItem || !targetCustomerName.replace(/\s+/g, '') || transferQuantity < 1) return;
     const { orderId, item } = transferringItem;
-    const trimmedTarget = targetCustomerName.trim();
+    const trimmedTarget = targetCustomerName.replace(/\s+/g, '');
 
-    if (trimmedTarget === customer.name) {
+    if (trimmedTarget === customer.name.replace(/\s+/g, '')) {
       showToast('不能轉讓給原顧客自己！', 'error');
       return;
     }
 
     try {
       // 1. Find or create target customer
-      let targetCust = customers.find(c => c.name.trim() === trimmedTarget);
+      let targetCust = customers.find(c => c.name.replace(/\s+/g, '') === trimmedTarget);
       let targetId = targetCust?.id;
 
       if (!targetCust) {
@@ -3010,18 +3010,18 @@ const Dashboard = ({
   const [targetCustomerName, setTargetCustomerName] = useState('');
 
   const handleReleaseTransfer = async () => {
-    if (!transferringRelease || !targetCustomerName.trim()) return;
+    if (!transferringRelease || !targetCustomerName.replace(/\s+/g, '')) return;
     const release = transferringRelease;
-    const trimmedTarget = targetCustomerName.trim();
+    const trimmedTarget = targetCustomerName.replace(/\s+/g, '');
 
-    if (trimmedTarget === release.customerName) {
+    if (trimmedTarget === release.customerName.replace(/\s+/g, '')) {
       showToast('不能轉讓給原顧客自己！', 'error');
       return;
     }
 
     try {
       // 1. Find or create target customer
-      let targetCust = customers.find(c => c.name.trim() === trimmedTarget);
+      let targetCust = customers.find(c => c.name.replace(/\s+/g, '') === trimmedTarget);
       let targetId = targetCust?.id;
 
       if (!targetCust) {
