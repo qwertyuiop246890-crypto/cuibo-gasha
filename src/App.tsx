@@ -628,11 +628,14 @@ const CreateOrder = ({
         
         totalAddedAmount += subtotal;
 
-        const existingItemIdx = updatedItems.findIndex(i => 
-          i.machineName === machineName && 
-          (i.variant || '') === finalVariant && 
-          i.price === itemPrice
-        );
+        const existingItemIdx = updatedItems.findIndex(i => {
+          const isSameMachine = i.machineName === machineName;
+          const isSameVariant = (i.variant || '') === finalVariant;
+          const isSamePrice = i.price === itemPrice;
+          const isSameDate = i.createdAt && format(toZonedTime(new Date(i.createdAt), TAIWAN_TZ), 'yyyy-MM-dd') === format(toZonedTime(new Date(now), TAIWAN_TZ), 'yyyy-MM-dd');
+          
+          return isSameMachine && isSameVariant && isSamePrice && isSameDate;
+        });
 
         if (existingItemIdx > -1) {
           const item = updatedItems[existingItemIdx];
@@ -2977,18 +2980,23 @@ const Dashboard = ({
   const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');
 
-  const filteredOrders = orders.filter(o => {
-    if (!startDate && !endDate) return true;
-    if (!o.createdAt) return false;
+  const filteredOrders = orders.map(o => {
+    if (!startDate && !endDate) return o;
     
-    // 將訂單時間轉換為台灣時區的 YYYY-MM-DD 格式進行精確比對
-    const orderDateStr = format(toZonedTime(new Date(o.createdAt), TAIWAN_TZ), 'yyyy-MM-dd');
-    
-    if (startDate && orderDateStr < startDate) return false;
-    if (endDate && orderDateStr > endDate) return false;
-    
-    return true;
-  });
+    const filteredItems = o.items.filter(item => {
+      if (!item.createdAt) return false;
+      const itemDateStr = format(toZonedTime(new Date(item.createdAt), TAIWAN_TZ), 'yyyy-MM-dd');
+      if (startDate && itemDateStr < startDate) return false;
+      if (endDate && itemDateStr > endDate) return false;
+      return true;
+    });
+
+    return {
+      ...o,
+      items: filteredItems,
+      totalAmount: filteredItems.reduce((sum, i) => sum + i.subtotal, 0)
+    };
+  }).filter(o => o.items.length > 0);
 
   const totalRevenue = filteredOrders.reduce((sum, o) => sum + o.totalAmount, 0);
   const totalItems = filteredOrders.reduce((sum, o) => sum + o.items.reduce((s, i) => s + i.quantity, 0), 0);
