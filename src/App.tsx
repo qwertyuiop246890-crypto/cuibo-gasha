@@ -2979,13 +2979,14 @@ const Dashboard = ({
 
   const filteredOrders = orders.filter(o => {
     if (!startDate && !endDate) return true;
-    const orderDate = new Date(o.createdAt);
-    if (startDate && new Date(startDate) > orderDate) return false;
-    if (endDate) {
-      const end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-      if (end < orderDate) return false;
-    }
+    if (!o.createdAt) return false;
+    
+    // 將訂單時間轉換為台灣時區的 YYYY-MM-DD 格式進行精確比對
+    const orderDateStr = format(toZonedTime(new Date(o.createdAt), TAIWAN_TZ), 'yyyy-MM-dd');
+    
+    if (startDate && orderDateStr < startDate) return false;
+    if (endDate && orderDateStr > endDate) return false;
+    
     return true;
   });
 
