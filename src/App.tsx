@@ -406,6 +406,23 @@ const CreateOrder = ({
       };
 
       const compressedDataUrl = await compressImage(file);
+      
+      // 檢查是否已經上傳過相同的圖片
+      const existingMachineByImg = machines.find(m => m.imageUrl === compressedDataUrl);
+      if (existingMachineByImg) {
+        setMachineName(existingMachineByImg.name);
+        setPrice(existingMachineByImg.defaultPrice);
+        if (existingMachineByImg.variants && existingMachineByImg.variants.length > 0) {
+          setOrderItems(existingMachineByImg.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
+        } else {
+          setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
+        }
+        setUploadedImage(compressedDataUrl);
+        showToast('已載入相同圖片的機台資料！', 'success');
+        setIsAnalyzing(false);
+        return;
+      }
+
       const base64String = compressedDataUrl.split(',')[1];
       setUploadedImage(compressedDataUrl);
       
@@ -444,6 +461,8 @@ const CreateOrder = ({
 
 [約束條件]
 - 視覺核心優先與字數限制：去除所有行銷贅字。扭蛋系列檢貨標題絕對不可超過 15 個字。單款視覺特徵檢貨名稱應極致精煉，專注描述核心外觀差異，格式為「名稱+特徵」。
+- 現有機台優先：如果圖片中的商品明顯屬於以下「現有機台清單」中的某一款，請務必直接使用該機台的精確名稱作為 machineName 回傳，不要自己發明新名稱。
+  現有機台清單：${machines.map(m => m.name).join(', ')}
 - 證據優先：嚴禁使用「可能、應該、或許」等模糊推測。
 - 允許留白：若信心水準仍低於 90% 或無法確認品項，請直接放棄該品項命名，並輸出：「【資料不足，無法確認】」。
 - 格式要求：一律使用繁體中文。`,
@@ -474,29 +493,42 @@ const CreateOrder = ({
       const text = response.text;
       if (text) {
         const result = JSON.parse(text);
-        if (result.machineName) setMachineName(result.machineName);
-        if (result.variants && result.variants.length > 0) {
-          setOrderItems(result.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
-        } else if (result.variant) {
-          setOrderItems([{ id: crypto.randomUUID(), variant: result.variant, quantity: 1, isEco: false }]);
-        } else {
-          // If no variants found, still keep at least one item
-          setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
-        }
-        if (result.price) {
-          // Try to map JPY to NTD if it looks like JPY (e.g., 300, 400, 500)
-          const map = settings?.priceMap || DEFAULT_PRICE_MAP;
-          if (map[result.price]) {
-             setPrice(result.price); // Set JPY price directly, the submitOrder handles the conversion
+        const aiMachineName = result.machineName || '';
+        
+        // 檢查 AI 回傳的機台名稱是否已存在
+        const existingMachineByName = machines.find(m => m.name === aiMachineName);
+        
+        if (existingMachineByName) {
+          setMachineName(existingMachineByName.name);
+          setPrice(existingMachineByName.defaultPrice);
+          // 如果 AI 有辨識出款式，優先使用 AI 辨識的款式作為當前訂單項目
+          if (result.variants && result.variants.length > 0) {
+            setOrderItems(result.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
+          } else if (result.variant) {
+            setOrderItems([{ id: crypto.randomUUID(), variant: result.variant, quantity: 1, isEco: false }]);
           } else {
-             // If it's already NTD or unknown, we might just set it as JPY price and let user adjust, or find closest.
-             // Let's just set it to the raw number and let the user adjust if needed.
-             // Actually, the price state is the JPY price (e.g. 300, 400).
-             // If the AI returns 300, it sets price to 300.
-             setPrice(result.price);
+            setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
           }
+          showToast('已載入同名機台的現有資料！', 'success');
+        } else {
+          if (aiMachineName) setMachineName(aiMachineName);
+          if (result.variants && result.variants.length > 0) {
+            setOrderItems(result.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
+          } else if (result.variant) {
+            setOrderItems([{ id: crypto.randomUUID(), variant: result.variant, quantity: 1, isEco: false }]);
+          } else {
+            setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
+          }
+          if (result.price) {
+            const map = settings?.priceMap || DEFAULT_PRICE_MAP;
+            if (map[result.price]) {
+               setPrice(result.price);
+            } else {
+               setPrice(result.price);
+            }
+          }
+          showToast('圖片分析完成！', 'success');
         }
-        showToast('圖片分析完成！', 'success');
       }
       setIsAnalyzing(false);
     } catch (err) {
@@ -2819,46 +2851,43 @@ const PrintPreview = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-background flex flex-col">
-      <header className="p-6 border-b border-divider flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <button onClick={onClose} className="p-2 bg-card-white rounded-xl shadow-sm">
-            <ArrowLeft className="w-5 h-5" />
-          </button>
-          <h2 className="text-xl font-bold text-ink">列印預覽</h2>
-        </div>
+    <div className="space-y-6 pb-24">
+      <div className="flex items-center justify-between bg-card-white p-4 rounded-2xl card-shadow">
+        <h2 className="text-xl font-bold text-ink">列印預覽</h2>
         <button 
           onClick={() => handlePrint()}
           className="px-6 py-2 bg-primary-blue text-white rounded-xl font-bold flex items-center gap-2"
         >
           <Printer className="w-4 h-4" /> 列印所選 ({selectedIds.length})
         </button>
-      </header>
+      </div>
 
-      <div className="flex-1 flex overflow-hidden">
-        <div className="w-full sm:w-1/3 border-r border-divider overflow-y-auto p-4 space-y-2">
+      <div className="flex flex-col lg:flex-row gap-6">
+        <div className="w-full lg:w-1/3 space-y-2">
           <button 
             onClick={toggleAll}
-            className="w-full py-3 bg-card-white rounded-xl font-bold text-ink text-sm border border-divider mb-4"
+            className="w-full py-3 bg-card-white rounded-xl font-bold text-ink text-sm border border-divider mb-4 card-shadow"
           >
             {selectedIds.length === customers.length ? '取消全選' : '全選顧客'}
           </button>
-          {customers.map(c => (
-            <div 
-              key={c.id} 
-              onClick={() => toggleOne(c.id)}
-              className={cn(
-                "p-4 rounded-2xl cursor-pointer transition-all border-2",
-                selectedIds.includes(c.id) ? "bg-primary-blue/5 border-primary-blue" : "bg-card-white border-transparent"
-              )}
-            >
-              <p className="font-bold text-ink text-sm">{c.name}</p>
-              <p className="text-[10px] text-ink/40">NT${c.totalSpent}</p>
-            </div>
-          ))}
+          <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-2">
+            {customers.map(c => (
+              <div 
+                key={c.id} 
+                onClick={() => toggleOne(c.id)}
+                className={cn(
+                  "p-4 rounded-2xl cursor-pointer transition-all border-2 card-shadow",
+                  selectedIds.includes(c.id) ? "bg-primary-blue/5 border-primary-blue" : "bg-card-white border-transparent"
+                )}
+              >
+                <p className="font-bold text-ink text-sm">{c.name}</p>
+                <p className="text-[10px] text-ink/40">NT${c.totalSpent}</p>
+              </div>
+            ))}
+          </div>
         </div>
 
-        <div className="hidden sm:block flex-1 bg-ink/5 overflow-y-auto p-8">
+        <div className="hidden lg:block w-full lg:w-2/3 bg-ink/5 rounded-3xl p-4 sm:p-8 overflow-y-auto max-h-[70vh]">
           <div ref={printRef} className="bg-white w-[210mm] min-h-[297mm] mx-auto p-12 shadow-2xl print:shadow-none print:m-0 print:w-full print:p-0">
             <style>{`
               @media print {
