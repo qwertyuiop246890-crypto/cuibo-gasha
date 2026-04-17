@@ -2286,6 +2286,7 @@ const CustomerDetailView = ({
   const [releaseQuantity, setReleaseQuantity] = useState(1);
   const [isEditingName, setIsEditingName] = useState(false);
   const [editedName, setEditedName] = useState(customer.name);
+  const [itemSortBy, setItemSortBy] = useState<'time' | 'machine'>('machine');
 
   const handleSaveName = async () => {
     const newName = editedName.replace(/\s+/g, '');
@@ -2555,6 +2556,22 @@ const CustomerDetailView = ({
         grouped.push({ ...item, rawIds: [item.id] });
       }
     });
+
+    grouped.sort((a, b) => {
+      if (itemSortBy === 'machine') {
+        if (a.machineName === b.machineName) {
+          const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+          const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+          return aTime - bTime;
+        }
+        return a.machineName.localeCompare(b.machineName, 'zh-Hant');
+      } else {
+        const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return aTime - bTime;
+      }
+    });
+
     return grouped;
   };
 
@@ -2606,12 +2623,34 @@ const CustomerDetailView = ({
             </div>
           </div>
         </div>
-        <button 
-          onClick={onCopyNotification}
-          className="px-4 py-2 bg-primary-blue/10 text-primary-blue rounded-xl font-bold text-sm hover:bg-primary-blue/20 transition-colors"
-        >
-          複製通知
-        </button>
+        <div className="flex items-center gap-2">
+          <div className="flex bg-background p-1 rounded-xl">
+            <button 
+              onClick={() => setItemSortBy('machine')}
+              className={cn(
+                "px-3 py-1.5 rounded-lg text-xs font-bold transition-all",
+                itemSortBy === 'machine' ? "bg-card-white text-ink shadow-sm" : "text-ink/40"
+              )}
+            >
+              依機台
+            </button>
+            <button 
+              onClick={() => setItemSortBy('time')}
+              className={cn(
+                "px-3 py-1.5 rounded-lg text-xs font-bold transition-all",
+                itemSortBy === 'time' ? "bg-card-white text-ink shadow-sm" : "text-ink/40"
+              )}
+            >
+              依時間
+            </button>
+          </div>
+          <button 
+            onClick={onCopyNotification}
+            className="px-4 py-2 bg-primary-blue/10 text-primary-blue rounded-xl font-bold text-sm hover:bg-primary-blue/20 transition-colors"
+          >
+            複製通知
+          </button>
+        </div>
       </header>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-6 pb-32">
@@ -3862,6 +3901,17 @@ export default function App() {
         grouped.push({ ...item });
       }
     });
+
+    // 按照同樣名稱的機台排序 然後按照時間由舊到新排序
+    grouped.sort((a, b) => {
+      if (a.machineName === b.machineName) {
+        const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return aTime - bTime;
+      }
+      return a.machineName.localeCompare(b.machineName, 'zh-Hant');
+    });
+
     return grouped;
   };
 
