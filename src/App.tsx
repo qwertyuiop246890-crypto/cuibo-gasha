@@ -4,7 +4,7 @@ import {
   Search, Printer, Copy, Download, Upload, Trash2, 
   LogOut, ChevronRight, CheckCircle2, AlertCircle, X,
   ArrowLeft, Save, RefreshCw, TrendingUp, MessageSquare,
-  Coins, ArrowRight, Database, Home, ArrowRightLeft, UserPlus,
+  Coins, ArrowRight, Database, Home, ArrowRightLeft, UserPlus, User as UserIcon,
   Grid2x2, LayoutGrid, Edit2, Calendar
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -1056,13 +1056,27 @@ const OrdersList = ({
     }
   };
 
-  const filteredOrders = orders.filter(o => {
+  // Flatten and mix in order metadata
+  const flattenedItems = orders.flatMap(order => 
+    order.items.map(item => ({
+      ...item,
+      orderId: order.id,
+      customerName: order.customerName,
+      customerId: order.customerId,
+      orderTime: order.createdAt || item.createdAt || new Date().toISOString()
+    }))
+  );
+
+  const filteredItems = flattenedItems.filter(item => {
     const lowerSearch = searchTerm.toLowerCase();
-    return o.customerName.toLowerCase().includes(lowerSearch) ||
-           o.items.some(item => 
-             item.machineName.toLowerCase().includes(lowerSearch) || 
-             (item.variant && item.variant.toLowerCase().includes(lowerSearch))
-           );
+    return item.customerName.toLowerCase().includes(lowerSearch) ||
+           item.machineName.toLowerCase().includes(lowerSearch) ||
+           (item.variant && item.variant.toLowerCase().includes(lowerSearch));
+  });
+
+  // Sort newest to oldest
+  const sortedItems = filteredItems.sort((a, b) => {
+    return new Date(b.orderTime).getTime() - new Date(a.orderTime).getTime();
   });
 
   return (
@@ -1072,120 +1086,92 @@ const OrdersList = ({
         <input 
           type="text" 
           placeholder="搜尋顧客、商品名稱或款式..." 
-          className="w-full pl-12 pr-4 py-4 bg-card-white rounded-2xl border-none card-shadow"
+          className="w-full pl-12 pr-4 py-4 bg-card-white rounded-2xl border-none card-shadow focus:ring-2 focus:ring-primary-blue transition-all"
           onChange={(e) => setSearchTerm(e.target.value)}
         />
       </div>
       
-      {filteredOrders.length === 0 ? (
+      {sortedItems.length === 0 ? (
         <div className="bg-card-white p-12 rounded-3xl card-shadow text-center">
           <div className="w-16 h-16 bg-background rounded-full flex items-center justify-center mx-auto mb-4">
             <Package className="w-8 h-8 text-ink/20" />
           </div>
-          <p className="text-ink/40 font-bold">尚未有訂單資料</p>
+          <p className="text-ink/40 font-bold">尚未有資料</p>
           {searchTerm && <p className="text-xs text-ink/20 mt-1">請嘗試其他搜尋關鍵字</p>}
         </div>
       ) : (
-        filteredOrders.map(order => (
-          <motion.div 
-            layout
-            key={order.id} 
-            className="bg-card-white p-6 rounded-3xl card-shadow border-l-4 border-primary-blue"
-          >
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h4 className="font-bold text-lg text-ink">{order.customerName}</h4>
-                <div className="flex items-center gap-2">
-                  <p className="text-xs text-ink/40">{order.createdAt ? format(toZonedTime(new Date(order.createdAt), TAIWAN_TZ), 'yyyy/MM/dd HH:mm') : '無日期'}</p>
-                  <span className="text-[10px] text-ink/20">•</span>
-                  <p className="text-xs text-ink/40">共 {order.items.reduce((sum, i) => sum + i.quantity, 0)} 顆</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-3">
-                <div className="text-right">
-                  <p className="text-xl font-bold text-ink">NT${order.totalAmount}</p>
-                </div>
-                <button 
-                  onClick={() => {
-                    setConfirmModal({
-                      show: true,
-                      title: '刪除訂單',
-                      message: `確定要刪除 ${order.customerName} 的這筆訂單嗎？`,
-                      type: 'danger',
-                      onConfirm: async () => {
-                        try {
-                          await deleteDoc(dbDoc('orders', order.id));
-                          
-                          // Update customer stats
-                          await updateDoc(dbDoc('customers', order.customerId), {
-                            totalSpent: increment(-order.totalAmount),
-                            totalItems: increment(-order.items.reduce((sum, i) => sum + i.quantity, 0))
-                          });
-
-                          showToast('訂單已刪除');
-                        } catch (err) {
-                          handleFirestoreError(err, OperationType.DELETE, `orders/${order.id}`);
-                        }
-                      }
-                    });
-                  }}
-                  className="p-2 text-red-400 hover:bg-red-50 rounded-xl transition-colors"
-                >
-                  <Trash2 className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-            <div className="space-y-2 mb-4">
-              {order.items.map((item, idx) => {
-                const machine = machines.find(m => m.name === item.machineName);
-                return (
+        <div className="space-y-3">
+          {sortedItems.map((item, idx) => {
+            const machine = machines.find(m => m.name === item.machineName);
+            return (
+              <motion.div 
+                layout
+                key={`${item.orderId}-${item.id}`} 
+                className="bg-card-white p-4 rounded-2xl card-shadow border-l-4 border-primary-blue flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-slate-50 transition-colors"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.2, delay: Math.min(idx * 0.05, 0.5) }}
+              >
+                <div className="flex items-start sm:items-center gap-4">
                   <div 
-                    key={idx} 
-                    className="flex items-center justify-between text-sm p-2 hover:bg-background rounded-xl transition-colors group"
+                    className="w-12 h-12 bg-background rounded-xl flex items-center justify-center overflow-hidden flex-shrink-0 cursor-pointer shadow-sm"
+                    onClick={() => {
+                      if (machine) {
+                        setEditingMachine(machine);
+                      } else {
+                        setEditingMachine({
+                          id: '',
+                          name: item.machineName,
+                          defaultPrice: 0,
+                          variants: [],
+                          imageUrl: null
+                        });
+                      }
+                    }}
                   >
-                    <div 
-                      className="flex items-center gap-3 cursor-pointer"
-                      onClick={() => {
-                        if (machine) {
-                          setEditingMachine(machine);
-                        } else {
-                          setEditingMachine({
-                            id: '',
-                            name: item.machineName,
-                            defaultPrice: 0,
-                            variants: [],
-                            imageUrl: null
-                          });
-                        }
-                      }}
-                    >
-                      <div className="w-8 h-8 bg-background rounded-lg flex items-center justify-center overflow-hidden flex-shrink-0">
-                        {machine?.imageUrl ? (
-                          <img src={machine.imageUrl} alt={item.machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                        ) : (
-                          <Package className="w-4 h-4 text-ink/20" />
-                        )}
-                      </div>
-                      <div className="flex flex-col">
-                        <span className="text-ink/70 group-hover:text-primary-blue transition-colors">{item.machineName} {item.variant && `(${item.variant})`}</span>
-                        <span className="text-[10px] text-ink/30">{formatDateTime(item.createdAt)}</span>
-                      </div>
+                    {machine?.imageUrl ? (
+                      <img src={machine.imageUrl} alt={item.machineName} className="w-full h-full object-cover relative z-10" referrerPolicy="no-referrer" />
+                    ) : (
+                      <Package className="w-5 h-5 text-ink/20 relative z-10" />
+                    )}
+                  </div>
+                  <div className="flex flex-col">
+                    <div className="text-[15px] font-bold text-ink leading-snug flex flex-wrap items-center gap-2">
+                      {item.machineName}
+                      {item.variant && (
+                        <span className="px-2 py-0.5 bg-primary-blue/10 text-primary-blue rounded-md text-xs whitespace-nowrap">
+                          {item.variant}
+                        </span>
+                      )}
                     </div>
-                    <div className="flex items-center gap-3">
-                      <span className="font-medium text-ink/40">NT${item.price} x {item.quantity}</span>
-                      <button 
-                        onClick={() => setEditingItem({ orderId: order.id, item })}
-                        className="p-1.5 text-ink/40 hover:text-primary-blue hover:bg-primary-blue/10 rounded-lg opacity-0 group-hover:opacity-100 transition-all"
-                      >
-                        <Save className="w-3.5 h-3.5" />
-                      </button>
+                    <div className="text-[13px] text-ink/60 mt-1 flex items-center gap-1">
+                      <UserIcon className="w-3.5 h-3.5" />
+                      {item.customerName}
                     </div>
                   </div>
-                );
-              })}
-            </div>
-          </motion.div>
-        ))
+                </div>
+
+                <div className="flex items-center justify-between sm:justify-end gap-6 w-full sm:w-auto mt-2 sm:mt-0 pt-3 sm:pt-0 border-t border-ink/5 sm:border-0">
+                  <div className="flex flex-col items-center">
+                    <span className="text-[10px] uppercase font-bold text-ink/30 tracking-wider mb-0.5">數量</span>
+                    <span className="font-bold text-ink text-lg bg-background px-3 py-0.5 rounded-lg">{item.quantity}</span>
+                  </div>
+                  <div className="flex flex-col items-end gap-1">
+                    <span className="text-xs text-ink/40 tracking-tight">
+                      {format(toZonedTime(new Date(item.orderTime), TAIWAN_TZ), 'yyyy/MM/dd HH:mm')}
+                    </span>
+                    <button 
+                      onClick={() => setEditingItem({ orderId: item.orderId, item })}
+                      className="p-1.5 text-primary-blue bg-primary-blue/5 hover:bg-primary-blue hover:text-white rounded-lg transition-all"
+                    >
+                      <Save className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            );
+          })}
+        </div>
       )}
 
       {/* Edit Modal */}
@@ -1244,7 +1230,7 @@ const OrdersList = ({
                       setConfirmModal({
                         show: true,
                         title: '刪除項目',
-                        message: `確定要從訂單中刪除 ${editingItem.item.machineName} 嗎？`,
+                        message: `確定要從這個顧客的清單中刪除 ${editingItem.item.machineName} 嗎？`,
                         type: 'danger',
                         onConfirm: async () => {
                           const order = orders.find(o => o.id === editingItem.orderId);
