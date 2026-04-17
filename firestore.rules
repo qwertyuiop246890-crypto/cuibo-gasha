@@ -73,8 +73,7 @@ service cloud.firestore {
     }
 
     function isValidDateString(dateStr) {
-      return dateStr is string &&
-        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+      return dateStr is string || dateStr == null;
     }
 
     // ===============================================================
@@ -84,7 +83,7 @@ service cloud.firestore {
       return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
              data.totalSpent is number && data.totalSpent >= 0 &&
              data.totalItems is number && data.totalItems >= 0 &&
-             isValidDateString(data.createdAt);
+             (!('createdAt' in data) || isValidDateString(data.createdAt));
     }
 
     function isValidOrder(data) {
@@ -92,7 +91,7 @@ service cloud.firestore {
              data.items is list && data.items.size() >= 0 && data.items.size() < 50 &&
              data.totalAmount is number && data.totalAmount >= 0 &&
              data.status in ['pending', 'completed', 'cancelled'] &&
-             isValidDateString(data.createdAt);
+             (!('createdAt' in data) || isValidDateString(data.createdAt));
     }
 
     function isValidSettings(data) {
@@ -104,7 +103,7 @@ service cloud.firestore {
       return data.name is string && data.name.size() > 0 &&
              data.defaultPrice is number && data.defaultPrice >= 0 &&
              data.variants is list &&
-             isValidDateString(data.createdAt);
+             (!('createdAt' in data) || isValidDateString(data.createdAt));
     }
 
     function isValidRelease(data) {
@@ -114,7 +113,7 @@ service cloud.firestore {
              data.quantity is number && data.quantity >= 0 &&
              data.price is number && data.price >= 0 &&
              data.status in ['pending', 'completed', 'cancelled'] &&
-             isValidDateString(data.createdAt);
+             (!('createdAt' in data) || isValidDateString(data.createdAt));
     }
 
     // ===============================================================
