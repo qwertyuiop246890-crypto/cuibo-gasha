@@ -660,33 +660,16 @@ const CreateOrder = ({
         
         totalAddedAmount += subtotal;
 
-        const existingItemIdx = updatedItems.findIndex(i => {
-          const isSameMachine = i.machineName === machineName;
-          const isSameVariant = (i.variant || '') === finalVariant;
-          const isSamePrice = i.price === itemPrice;
-          const isSameDate = i.createdAt && format(toZonedTime(new Date(i.createdAt), TAIWAN_TZ), 'yyyy-MM-dd') === format(toZonedTime(new Date(now), TAIWAN_TZ), 'yyyy-MM-dd');
-          
-          return isSameMachine && isSameVariant && isSamePrice && isSameDate;
+        updatedItems.push({
+          id: Math.random().toString(36).substr(2, 9),
+          machineName,
+          price: itemPrice,
+          quantity: orderItem.quantity,
+          variant: finalVariant,
+          subtotal,
+          createdAt: now,
+          isChecked: false
         });
-
-        if (existingItemIdx > -1) {
-          const item = updatedItems[existingItemIdx];
-          updatedItems[existingItemIdx] = {
-            ...item,
-            quantity: item.quantity + orderItem.quantity,
-            subtotal: item.subtotal + subtotal
-          };
-        } else {
-          updatedItems.push({
-            id: Math.random().toString(36).substr(2, 9),
-            machineName,
-            price: itemPrice,
-            quantity: orderItem.quantity,
-            variant: finalVariant,
-            subtotal,
-            createdAt: now
-          });
-        }
       }
 
       if (totalAddedQuantity > 0 && customerId) {
@@ -1023,6 +1006,8 @@ const OrdersList = ({
   setEditingMachine: (m: any) => void
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
+  const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
+  const [dateFilter, setDateFilter] = useState('');
   const [editingItem, setEditingItem] = useState<{ orderId: string, item: OrderItem } | null>(null);
 
   const handleUpdateItem = async (orderId: string, updatedItem: OrderItem) => {
@@ -1056,6 +1041,24 @@ const OrdersList = ({
     }
   };
 
+  const handleToggleCheck = async (orderId: string, item: OrderItem) => {
+    try {
+      const order = orders.find(o => o.id === orderId);
+      if (!order) return;
+
+      const newItems = order.items.map(i => 
+        i.id === item.id ? { ...i, isChecked: !i.isChecked } : i
+      );
+
+      await updateDoc(dbDoc('orders', orderId), {
+        items: newItems,
+        updatedAt: new Date().toISOString()
+      });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
+    }
+  };
+
   // Flatten and mix in order metadata
   const flattenedItems = orders.flatMap(order => 
     order.items.map(item => ({
@@ -1063,32 +1066,55 @@ const OrdersList = ({
       orderId: order.id,
       customerName: order.customerName,
       customerId: order.customerId,
-      orderTime: order.createdAt || item.createdAt || new Date().toISOString()
+      orderTime: item.createdAt || order.createdAt || new Date().toISOString()
     }))
   );
 
   const filteredItems = flattenedItems.filter(item => {
     const lowerSearch = searchTerm.toLowerCase();
-    return item.customerName.toLowerCase().includes(lowerSearch) ||
+    const itemDate = item.orderTime ? format(toZonedTime(new Date(item.orderTime), TAIWAN_TZ), 'yyyy-MM-dd') : '';
+    
+    return (item.customerName.toLowerCase().includes(lowerSearch) ||
            item.machineName.toLowerCase().includes(lowerSearch) ||
-           (item.variant && item.variant.toLowerCase().includes(lowerSearch));
+           (item.variant && item.variant.toLowerCase().includes(lowerSearch))) &&
+           (!dateFilter || itemDate === dateFilter);
   });
 
-  // Sort newest to oldest
+  // Sort by orderTime based on sortOrder
   const sortedItems = filteredItems.sort((a, b) => {
-    return new Date(b.orderTime).getTime() - new Date(a.orderTime).getTime();
+    const timeA = new Date(a.orderTime).getTime();
+    const timeB = new Date(b.orderTime).getTime();
+    return sortOrder === 'desc' ? timeB - timeA : timeA - timeB;
   });
 
   return (
     <div className="space-y-4">
-      <div className="relative mb-6">
-        <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-ink/30" />
-        <input 
-          type="text" 
-          placeholder="搜尋顧客、商品名稱或款式..." 
-          className="w-full pl-12 pr-4 py-4 bg-card-white rounded-2xl border-none card-shadow focus:ring-2 focus:ring-primary-blue transition-all"
-          onChange={(e) => setSearchTerm(e.target.value)}
-        />
+      <div className="bg-card-white p-4 rounded-2xl card-shadow flex flex-col sm:flex-row gap-4 mb-6">
+        <div className="relative flex-1">
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-ink/30" />
+          <input 
+            type="text" 
+            placeholder="搜尋顧客、商品名稱或款式..." 
+            className="w-full pl-12 pr-4 py-3 bg-background rounded-xl border-none focus:ring-2 focus:ring-primary-blue transition-all"
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+          />
+        </div>
+        <div className="flex flex-row gap-4">
+          <input 
+            type="date" 
+            className="px-4 py-3 bg-background rounded-xl border-none text-ink cursor-pointer outline-none focus:ring-2 focus:ring-primary-blue"
+            value={dateFilter}
+            onChange={(e) => setDateFilter(e.target.value)}
+          />
+          <button
+            onClick={() => setSortOrder(prev => prev === 'desc' ? 'asc' : 'desc')}
+            className="flex items-center gap-2 px-4 py-3 bg-background rounded-xl text-ink font-medium whitespace-nowrap hover:bg-ink/5 transition-colors"
+          >
+            <ArrowRightLeft className="w-4 h-4 rotate-90" />
+            {sortOrder === 'desc' ? '由新到舊' : '由舊到新'}
+          </button>
+        </div>
       </div>
       
       {sortedItems.length === 0 ? (
@@ -1097,24 +1123,37 @@ const OrdersList = ({
             <Package className="w-8 h-8 text-ink/20" />
           </div>
           <p className="text-ink/40 font-bold">尚未有資料</p>
-          {searchTerm && <p className="text-xs text-ink/20 mt-1">請嘗試其他搜尋關鍵字</p>}
+          {(searchTerm || dateFilter) && <p className="text-xs text-ink/20 mt-1">請嘗試清除篩選條件</p>}
         </div>
       ) : (
         <div className="space-y-3">
           {sortedItems.map((item, idx) => {
             const machine = machines.find(m => m.name === item.machineName);
+            const isChecked = !!item.isChecked;
             return (
               <motion.div 
                 layout
                 key={`${item.orderId}-${item.id}`} 
-                className="bg-card-white p-4 rounded-2xl card-shadow border-l-4 border-primary-blue flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-slate-50 transition-colors"
+                className={cn(
+                  "bg-card-white p-4 rounded-2xl border-l-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all duration-300",
+                  isChecked ? "border-green-400 opacity-60 bg-green-50/10" : "border-primary-blue hover:bg-slate-50 card-shadow"
+                )}
                 initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
+                animate={{ opacity: isChecked ? 0.6 : 1, y: 0 }}
                 transition={{ duration: 0.2, delay: Math.min(idx * 0.05, 0.5) }}
               >
-                <div className="flex items-start sm:items-center gap-4">
+                <div className="flex items-start sm:items-center gap-4 flex-1">
+                  <button
+                    onClick={() => handleToggleCheck(item.orderId, item)}
+                    className={cn(
+                      "w-8 h-8 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-colors shadow-sm",
+                      isChecked ? "bg-green-400 border-green-400 text-white" : "border-ink/20 text-transparent hover:border-green-400 hover:text-green-400/30"
+                    )}
+                  >
+                    <CheckCircle2 className="w-5 h-5" />
+                  </button>
                   <div 
-                    className="w-12 h-12 bg-background rounded-xl flex items-center justify-center overflow-hidden flex-shrink-0 cursor-pointer shadow-sm"
+                    className="w-12 h-12 bg-background rounded-xl flex items-center justify-center overflow-hidden flex-shrink-0 cursor-pointer shadow-sm relative group"
                     onClick={() => {
                       if (machine) {
                         setEditingMachine(machine);
@@ -1130,16 +1169,19 @@ const OrdersList = ({
                     }}
                   >
                     {machine?.imageUrl ? (
-                      <img src={machine.imageUrl} alt={item.machineName} className="w-full h-full object-cover relative z-10" referrerPolicy="no-referrer" />
+                      <img src={machine.imageUrl} alt={item.machineName} className="w-full h-full object-cover relative z-10 transition-transform group-hover:scale-110" referrerPolicy="no-referrer" />
                     ) : (
                       <Package className="w-5 h-5 text-ink/20 relative z-10" />
                     )}
                   </div>
                   <div className="flex flex-col">
-                    <div className="text-[15px] font-bold text-ink leading-snug flex flex-wrap items-center gap-2">
+                    <div className={cn(
+                      "text-[15px] font-bold leading-snug flex flex-wrap items-center gap-2",
+                      isChecked ? "text-ink/60 line-through" : "text-ink"
+                    )}>
                       {item.machineName}
                       {item.variant && (
-                        <span className="px-2 py-0.5 bg-primary-blue/10 text-primary-blue rounded-md text-xs whitespace-nowrap">
+                        <span className="px-2 py-0.5 bg-primary-blue/10 text-primary-blue rounded-md text-xs whitespace-nowrap no-underline">
                           {item.variant}
                         </span>
                       )}
@@ -1151,10 +1193,15 @@ const OrdersList = ({
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between sm:justify-end gap-6 w-full sm:w-auto mt-2 sm:mt-0 pt-3 sm:pt-0 border-t border-ink/5 sm:border-0">
+                <div className="flex items-center justify-between sm:justify-end gap-6 w-full sm:w-auto mt-2 sm:mt-0 pt-3 sm:pt-0 border-t border-ink/5 sm:border-0 pl-12 sm:pl-0">
                   <div className="flex flex-col items-center">
                     <span className="text-[10px] uppercase font-bold text-ink/30 tracking-wider mb-0.5">數量</span>
-                    <span className="font-bold text-ink text-lg bg-background px-3 py-0.5 rounded-lg">{item.quantity}</span>
+                    <span className={cn(
+                      "font-bold text-lg px-3 py-0.5 rounded-lg",
+                      isChecked ? "bg-transparent text-ink/50" : "bg-background text-ink"
+                    )}>
+                      {item.quantity}
+                    </span>
                   </div>
                   <div className="flex flex-col items-end gap-1">
                     <span className="text-xs text-ink/40 tracking-tight">
@@ -1162,7 +1209,8 @@ const OrdersList = ({
                     </span>
                     <button 
                       onClick={() => setEditingItem({ orderId: item.orderId, item })}
-                      className="p-1.5 text-primary-blue bg-primary-blue/5 hover:bg-primary-blue hover:text-white rounded-lg transition-all"
+                      className="p-1.5 text-primary-blue hover:text-white hover:bg-primary-blue rounded-lg transition-all"
+                      disabled={isChecked}
                     >
                       <Save className="w-4 h-4" />
                     </button>
