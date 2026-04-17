@@ -1342,7 +1342,7 @@ const CustomersList = ({
   orders: Order[]
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
-  const [sortBy, setSortBy] = useState<'name' | 'spent'>('spent');
+  const [sortBy, setSortBy] = useState<'name' | 'spent' | 'lastOrder'>('lastOrder');
 
   const handleSyncAllStats = async () => {
     try {
@@ -1352,9 +1352,16 @@ const CustomersList = ({
         const actualTotalSpent = custOrders.reduce((sum, o) => sum + o.totalAmount, 0);
         const actualTotalItems = custOrders.reduce((sum, o) => sum + o.items.reduce((s, i) => s + i.quantity, 0), 0);
         
+        let lastOrderAt = customer.lastOrderAt;
+        if (custOrders.length > 0) {
+          const sortedOrders = [...custOrders].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+          lastOrderAt = sortedOrders[0].createdAt;
+        }
+
         batch.update(dbDoc('customers', customer.id), {
           totalSpent: actualTotalSpent,
-          totalItems: actualTotalItems
+          totalItems: actualTotalItems,
+          lastOrderAt
         });
       });
       await batch.commit();
@@ -1369,6 +1376,11 @@ const CustomersList = ({
     .sort((a, b) => {
       if (sortBy === 'name') {
         return a.name.localeCompare(b.name, 'zh-Hant');
+      }
+      if (sortBy === 'lastOrder') {
+        const dateA = a.lastOrderAt ? new Date(a.lastOrderAt).getTime() : 0;
+        const dateB = b.lastOrderAt ? new Date(b.lastOrderAt).getTime() : 0;
+        return dateB - dateA; // descending
       }
       return b.totalSpent - a.totalSpent;
     });
@@ -1388,16 +1400,25 @@ const CustomersList = ({
         <div className="flex items-center gap-2">
           <button 
             onClick={handleSyncAllStats}
-            className="p-4 bg-card-white text-primary-blue rounded-2xl card-shadow hover:bg-primary-blue/5 transition-colors"
+            className="p-4 bg-card-white text-primary-blue rounded-2xl card-shadow flex-shrink-0 hover:bg-primary-blue/5 transition-colors"
             title="同步所有顧客數據"
           >
             <RefreshCw className="w-5 h-5" />
           </button>
-          <div className="flex bg-card-white p-1 rounded-2xl card-shadow">
+          <div className="flex bg-card-white p-1 rounded-2xl card-shadow overflow-x-auto scroolbar-hide">
+            <button 
+              onClick={() => setSortBy('lastOrder')}
+              className={cn(
+                "px-3 sm:px-4 py-2 flex-shrink-0 rounded-xl text-xs font-bold transition-all whitespace-nowrap",
+                sortBy === 'lastOrder' ? "bg-ink text-white" : "text-ink/40"
+              )}
+            >
+              日期排序
+            </button>
             <button 
               onClick={() => setSortBy('spent')}
               className={cn(
-                "px-4 py-2 rounded-xl text-xs font-bold transition-all",
+                "px-3 sm:px-4 py-2 flex-shrink-0 rounded-xl text-xs font-bold transition-all whitespace-nowrap",
                 sortBy === 'spent' ? "bg-ink text-white" : "text-ink/40"
               )}
             >
@@ -1406,7 +1427,7 @@ const CustomersList = ({
             <button 
               onClick={() => setSortBy('name')}
               className={cn(
-                "px-4 py-2 rounded-xl text-xs font-bold transition-all",
+                "px-3 sm:px-4 py-2 flex-shrink-0 rounded-xl text-xs font-bold transition-all whitespace-nowrap",
                 sortBy === 'name' ? "bg-ink text-white" : "text-ink/40"
               )}
             >
