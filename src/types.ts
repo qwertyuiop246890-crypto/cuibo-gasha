@@ -21,6 +21,7 @@ export interface OrderItem {
   isReleased?: boolean;
   releaseQuantity?: number;
   createdAt: string;
+  isChecked?: boolean;
 }
 
 export interface Machine {
