@@ -80,7 +80,7 @@ service cloud.firestore {
     // Domain Validators
     // ===============================================================
     function isValidCustomer(data) {
-      return data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+      return data.name is string && data.name.size() > 0 && data.name.size() < 500 &&
              data.totalSpent is number && data.totalSpent >= 0 &&
              data.totalItems is number && data.totalItems >= 0 &&
              (!('createdAt' in data) || isValidDateString(data.createdAt));
@@ -88,7 +88,7 @@ service cloud.firestore {
 
     function isValidOrder(data) {
       return data.customerId is string && data.customerName is string &&
-             data.items is list && data.items.size() >= 0 && data.items.size() < 50 &&
+             data.items is list && data.items.size() >= 0 && data.items.size() < 2000 &&
              data.totalAmount is number && data.totalAmount >= 0 &&
              data.status in ['pending', 'completed', 'cancelled'] &&
              (!('createdAt' in data) || isValidDateString(data.createdAt));
@@ -101,7 +101,7 @@ service cloud.firestore {
 
     function isValidMachine(data) {
       return data.name is string && data.name.size() > 0 &&
-             data.defaultPrice is number && data.defaultPrice >= 0 &&
+             (data.defaultPrice is number || data.defaultPrice is string) &&
              data.variants is list &&
              (!('createdAt' in data) || isValidDateString(data.createdAt));
     }
@@ -116,40 +116,78 @@ service cloud.firestore {
              (!('createdAt' in data) || isValidDateString(data.createdAt));
     }
 
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
     // ===============================================================
-    // Rules
+    // Rules (Root - Admin Only)
     // ===============================================================
     match /customers/{customerId} {
-      allow read: if isAuthenticated();
+      allow read: if isAdmin();
       allow create: if isAdmin() && isValidCustomer(request.resource.data);
       allow update: if isAdmin() && isValidCustomer(request.resource.data);
       allow delete: if isAdmin();
     }
 
     match /orders/{orderId} {
-      allow read: if isAuthenticated();
+      allow read: if isAdmin();
       allow create: if isAdmin() && isValidOrder(request.resource.data);
       allow update: if isAdmin() && isValidOrder(request.resource.data);
       allow delete: if isAdmin();
     }
 
     match /settings/global {
-      allow read: if isAuthenticated();
+      allow read: if isAdmin();
       allow write: if isAdmin() && isValidSettings(request.resource.data);
     }
 
     match /machines/{machineId} {
-      allow read: if isAuthenticated();
+      allow read: if isAdmin();
       allow create: if isAdmin() && isValidMachine(request.resource.data);
       allow update: if isAdmin() && isValidMachine(request.resource.data);
       allow delete: if isAdmin();
     }
 
     match /releases/{releaseId} {
-      allow read: if isAuthenticated();
+      allow read: if isAdmin();
       allow create: if isAdmin() && isValidRelease(request.resource.data);
       allow update: if isAdmin() && isValidRelease(request.resource.data);
       allow delete: if isAdmin();
+    }
+
+    // ===============================================================
+    // Rules (Sandbox - Personal multi-tenant environments)
+    // ===============================================================
+    match /users/{userId} {
+      match /customers/{customerId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidCustomer(request.resource.data);
+        allow update: if isOwner(userId) && isValidCustomer(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
+      match /orders/{orderId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidOrder(request.resource.data);
+        allow update: if isOwner(userId) && isValidOrder(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
+      match /settings/global {
+        allow read: if isOwner(userId);
+        allow write: if isOwner(userId) && isValidSettings(request.resource.data);
+      }
+      match /machines/{machineId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidMachine(request.resource.data);
+        allow update: if isOwner(userId) && isValidMachine(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
+      match /releases/{releaseId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidRelease(request.resource.data);
+        allow update: if isOwner(userId) && isValidRelease(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
     }
   }
 }

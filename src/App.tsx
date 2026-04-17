@@ -20,7 +20,7 @@ import {
 import { useReactToPrint } from 'react-to-print';
 import { format } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
-import { auth, db } from './firebase';
+import { auth, db, col, dbDoc } from './firebase';
 import { cn } from './lib/utils';
 import { Customer, Order, OrderItem, SystemSettings } from './types';
 
@@ -631,7 +631,7 @@ const CreateOrder = ({
         customerId = customer?.id;
 
         if (!customer) {
-          const newCustRef = doc(collection(db, 'customers'));
+          const newCustRef = dbDoc('customers');
           const newCust: Omit<Customer, 'id'> = {
             name: trimmedName,
             totalSpent: 0,
@@ -691,14 +691,14 @@ const CreateOrder = ({
 
       if (totalAddedQuantity > 0 && customerId) {
         if (existingOrder) {
-          await updateDoc(doc(db, 'orders', existingOrder.id), {
+          await updateDoc(dbDoc('orders', existingOrder.id), {
             items: updatedItems,
             totalAmount: existingOrder.totalAmount + totalAddedAmount,
             updatedAt: now
           });
         } else {
           // Create new order
-          const orderRef = doc(collection(db, 'orders'));
+          const orderRef = dbDoc('orders');
           const newOrder: Omit<Order, 'id'> = {
             customerId: customerId!,
             customerName: trimmedName,
@@ -712,7 +712,7 @@ const CreateOrder = ({
         }
         
         // 3. Update customer stats
-        await updateDoc(doc(db, 'customers', customerId!), {
+        await updateDoc(dbDoc('customers', customerId!), {
           totalSpent: increment(totalAddedAmount),
           totalItems: increment(totalAddedQuantity),
           lastOrderAt: now
@@ -731,13 +731,13 @@ const CreateOrder = ({
           updates.imageUrl = uploadedImage;
         }
         if (Object.keys(updates).length > 1) { // more than just updatedAt
-          await updateDoc(doc(db, 'machines', machine.id), updates);
+          await updateDoc(dbDoc('machines', machine.id), updates);
         }
       } else {
-        const machineRef = doc(collection(db, 'machines'));
+        const machineRef = dbDoc('machines');
         const newMachine: any = {
           name: machineName,
-          defaultPrice: price,
+          defaultPrice: parseInt(price) || 0,
           variants: Array.from(newVariantsToSave),
           createdAt: now,
           updatedAt: now
@@ -769,8 +769,9 @@ const CreateOrder = ({
         setUploadedImage(null);
         setActiveTab('create');
       }
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, 'submitOrder');
+    } catch (err: any) {
+      console.error(err);
+      showToast(err?.message?.includes('Missing or insufficient') ? '無法連線：資料驗證或權限不足，請檢查資料格式！' : '發生錯誤，請稍後再試！', 'error');
     }
   };
 
@@ -1035,7 +1036,7 @@ const OrdersList = ({
       const newItems = order.items.map(i => i.id === updatedItem.id ? updatedItem : i);
       const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
 
-      await updateDoc(doc(db, 'orders', orderId), {
+      await updateDoc(dbDoc('orders', orderId), {
         items: newItems,
         totalAmount: newTotal,
         updatedAt: new Date().toISOString()
@@ -1043,7 +1044,7 @@ const OrdersList = ({
       
       // Update customer total spent and total items
       const diff = newTotal - order.totalAmount;
-      await updateDoc(doc(db, 'customers', order.customerId), {
+      await updateDoc(dbDoc('customers', order.customerId), {
         totalSpent: increment(diff),
         totalItems: increment(qtyDiff)
       });
@@ -1113,10 +1114,10 @@ const OrdersList = ({
                       type: 'danger',
                       onConfirm: async () => {
                         try {
-                          await deleteDoc(doc(db, 'orders', order.id));
+                          await deleteDoc(dbDoc('orders', order.id));
                           
                           // Update customer stats
-                          await updateDoc(doc(db, 'customers', order.customerId), {
+                          await updateDoc(dbDoc('customers', order.customerId), {
                             totalSpent: increment(-order.totalAmount),
                             totalItems: increment(-order.items.reduce((sum, i) => sum + i.quantity, 0))
                           });
@@ -1253,9 +1254,9 @@ const OrdersList = ({
                           
                           try {
                             if (newItems.length === 0) {
-                              await deleteDoc(doc(db, 'orders', order.id));
+                              await deleteDoc(dbDoc('orders', order.id));
                             } else {
-                              await updateDoc(doc(db, 'orders', order.id), {
+                              await updateDoc(dbDoc('orders', order.id), {
                                 items: newItems,
                                 totalAmount: newTotal,
                                 updatedAt: new Date().toISOString()
@@ -1263,7 +1264,7 @@ const OrdersList = ({
                             }
                             
                             // Update customer stats
-                            await updateDoc(doc(db, 'customers', order.customerId), {
+                            await updateDoc(dbDoc('customers', order.customerId), {
                               totalSpent: increment(-editingItem.item.subtotal),
                               totalItems: increment(-editingItem.item.quantity)
                             });
@@ -1317,7 +1318,7 @@ const CustomersList = ({
         const actualTotalSpent = custOrders.reduce((sum, o) => sum + o.totalAmount, 0);
         const actualTotalItems = custOrders.reduce((sum, o) => sum + o.items.reduce((s, i) => s + i.quantity, 0), 0);
         
-        batch.update(doc(db, 'customers', customer.id), {
+        batch.update(dbDoc('customers', customer.id), {
           totalSpent: actualTotalSpent,
           totalItems: actualTotalItems
         });
@@ -1434,12 +1435,12 @@ const CustomersList = ({
                         onConfirm: async (checked?: boolean) => {
                           try {
                             const batch = writeBatch(db);
-                            batch.delete(doc(db, 'customers', customer.id));
+                            batch.delete(dbDoc('customers', customer.id));
                             
                             if (checked) {
                               const customerOrders = orders.filter(o => o.customerId === customer.id);
                               customerOrders.forEach(order => {
-                                batch.delete(doc(db, 'orders', order.id));
+                                batch.delete(dbDoc('orders', order.id));
                               });
                             }
                             
@@ -1885,7 +1886,7 @@ const MachineManagement = ({
               orders.flatMap(o => o.items.filter(i => i.machineName === machineName).map(i => i.variant || ''))
             )).filter(v => v && !v.includes('(環保)'));
 
-            const newDocRef = doc(collection(db, 'machines'));
+            const newDocRef = dbDoc('machines');
             batch.set(newDocRef, {
               name: machineName,
               defaultPrice: guessedPrice,
@@ -1913,7 +1914,7 @@ const MachineManagement = ({
     const now = new Date().toISOString();
     const data = {
       name,
-      defaultPrice: parseInt(price),
+      defaultPrice: parseInt(price) || 0,
       variants: variantList,
       createdAt: now,
       updatedAt: now
@@ -1925,12 +1926,13 @@ const MachineManagement = ({
         showToast('此機台名稱已存在', 'error');
         return;
       }
-      const newDocRef = doc(collection(db, 'machines'));
+      const newDocRef = dbDoc('machines');
       await setDoc(newDocRef, data);
       showToast('機台新增成功');
       reset();
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, 'machines_create');
+    } catch (err: any) {
+      console.error(err);
+      showToast(err?.message?.includes('Missing or insufficient') ? '資料驗證失敗，請檢查權限或格式！' : '發生錯誤，請稍後再試！', 'error');
     }
   };
 
@@ -2245,17 +2247,17 @@ const CustomerDetailView = ({
       const batch = writeBatch(db);
       
       // Update customer doc
-      batch.update(doc(db, 'customers', customer.id), { name: newName });
+      batch.update(dbDoc('customers', customer.id), { name: newName });
       
       // Update all orders for this customer
       customerOrders.forEach(order => {
-        batch.update(doc(db, 'orders', order.id), { customerName: newName });
+        batch.update(dbDoc('orders', order.id), { customerName: newName });
       });
 
       // Update all releases for this customer
       const customerReleases = releases.filter(r => r.customerName === customer.name);
       customerReleases.forEach(release => {
-        batch.update(doc(db, 'releases', release.id), { customerName: newName });
+        batch.update(dbDoc('releases', release.id), { customerName: newName });
       });
 
       await batch.commit();
@@ -2271,7 +2273,7 @@ const CustomerDetailView = ({
       const actualTotalSpent = customerOrders.reduce((sum, o) => sum + o.totalAmount, 0);
       const actualTotalItems = customerOrders.reduce((sum, o) => sum + o.items.reduce((s, i) => s + i.quantity, 0), 0);
       
-      await updateDoc(doc(db, 'customers', customer.id), {
+      await updateDoc(dbDoc('customers', customer.id), {
         totalSpent: actualTotalSpent,
         totalItems: actualTotalItems
       });
@@ -2299,7 +2301,7 @@ const CustomerDetailView = ({
       const newItems = order.items.map(i => i.id === updatedItem.id ? updatedItem : i);
       const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
 
-      await updateDoc(doc(db, 'orders', orderId), {
+      await updateDoc(dbDoc('orders', orderId), {
         items: newItems,
         totalAmount: newTotal,
         updatedAt: new Date().toISOString()
@@ -2307,7 +2309,7 @@ const CustomerDetailView = ({
       
       // Update customer total spent and total items
       const diff = newTotal - order.totalAmount;
-      await updateDoc(doc(db, 'customers', customer.id), {
+      await updateDoc(dbDoc('customers', customer.id), {
         totalSpent: increment(diff),
         totalItems: increment(qtyDiff)
       });
@@ -2335,7 +2337,7 @@ const CustomerDetailView = ({
       let targetId = targetCust?.id;
 
       if (!targetCust) {
-        const newCustRef = doc(collection(db, 'customers'));
+        const newCustRef = dbDoc('customers');
         const newCust = {
           name: trimmedTarget,
           totalSpent: 0,
@@ -2369,12 +2371,12 @@ const CustomerDetailView = ({
       }
       
       const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
-      await updateDoc(doc(db, 'orders', orderId), {
+      await updateDoc(dbDoc('orders', orderId), {
         items: newItems,
         totalAmount: newTotal,
         updatedAt: new Date().toISOString()
       });
-      await updateDoc(doc(db, 'customers', customer.id), {
+      await updateDoc(dbDoc('customers', customer.id), {
         totalSpent: increment(-transferSubtotal),
         totalItems: increment(-transferQuantity)
       });
@@ -2403,13 +2405,13 @@ const CustomerDetailView = ({
           updatedItems = [...targetOrder.items, { ...item, id: crypto.randomUUID(), quantity: transferQuantity, subtotal: transferSubtotal, createdAt: now }];
         }
 
-        await updateDoc(doc(db, 'orders', targetOrder.id), {
+        await updateDoc(dbDoc('orders', targetOrder.id), {
           items: updatedItems,
           totalAmount: targetOrder.totalAmount + transferSubtotal,
           updatedAt: now
         });
       } else {
-        await setDoc(doc(collection(db, 'orders')), {
+        await setDoc(dbDoc('orders'), {
           customerId: targetId,
           customerName: trimmedTarget,
           items: [{ ...item, id: crypto.randomUUID(), quantity: transferQuantity, subtotal: transferSubtotal, createdAt: now }],
@@ -2419,7 +2421,7 @@ const CustomerDetailView = ({
           updatedAt: now
         });
       }
-      await updateDoc(doc(db, 'customers', targetId!), {
+      await updateDoc(dbDoc('customers', targetId!), {
         totalSpent: increment(transferSubtotal),
         totalItems: increment(transferQuantity),
         lastOrderAt: new Date().toISOString()
@@ -2437,7 +2439,7 @@ const CustomerDetailView = ({
     try {
       const existing = releases.find(r => r.orderId === orderId && r.itemId === item.id && r.status === 'pending');
       if (existing) {
-        await deleteDoc(doc(db, 'releases', existing.id));
+        await deleteDoc(dbDoc('releases', existing.id));
         showToast('已取消釋出');
       } else {
         setReleasingItem({ orderId, item });
@@ -2452,7 +2454,7 @@ const CustomerDetailView = ({
     if (!releasingItem || releaseQuantity < 1) return;
     const { orderId, item } = releasingItem;
     try {
-      const releaseRef = doc(collection(db, 'releases'));
+      const releaseRef = dbDoc('releases');
       const releaseData: any = {
         orderId,
         itemId: item.id,
@@ -2544,10 +2546,10 @@ const CustomerDetailView = ({
                     type: 'danger',
                     onConfirm: async () => {
                       try {
-                        await deleteDoc(doc(db, 'orders', order.id));
+                        await deleteDoc(dbDoc('orders', order.id));
                         
                         // Update customer stats
-                        await updateDoc(doc(db, 'customers', order.customerId), {
+                        await updateDoc(dbDoc('customers', order.customerId), {
                           totalSpent: increment(-order.totalAmount),
                           totalItems: increment(-order.items.reduce((sum, i) => sum + i.quantity, 0))
                         });
@@ -2725,9 +2727,9 @@ const CustomerDetailView = ({
                           
                           try {
                             if (newItems.length === 0) {
-                              await deleteDoc(doc(db, 'orders', order.id));
+                              await deleteDoc(dbDoc('orders', order.id));
                             } else {
-                              await updateDoc(doc(db, 'orders', order.id), {
+                              await updateDoc(dbDoc('orders', order.id), {
                                 items: newItems,
                                 totalAmount: newTotal,
                                 updatedAt: new Date().toISOString()
@@ -2735,7 +2737,7 @@ const CustomerDetailView = ({
                             }
                             
                             // Update customer stats
-                            await updateDoc(doc(db, 'customers', order.customerId), {
+                            await updateDoc(dbDoc('customers', order.customerId), {
                               totalSpent: increment(-editingItem.item.subtotal),
                               totalItems: increment(-editingItem.item.quantity)
                             });
@@ -3054,7 +3056,7 @@ const Dashboard = ({
       let targetId = targetCust?.id;
 
       if (!targetCust) {
-        const newCustRef = doc(collection(db, 'customers'));
+        const newCustRef = dbDoc('customers');
         const newCust = {
           name: trimmedTarget,
           totalSpent: 0,
@@ -3068,10 +3070,10 @@ const Dashboard = ({
       }
 
       // 2. Update release status
-      await updateDoc(doc(db, 'releases', release.id), { status: 'completed' });
+      await updateDoc(dbDoc('releases', release.id), { status: 'completed' });
       
       // 3. Update the original order item and customer
-      const orderRef = doc(db, 'orders', release.orderId);
+      const orderRef = dbDoc('orders', release.orderId);
       const orderSnap = await getDoc(orderRef);
       let itemToTransfer: any = null;
       
@@ -3105,7 +3107,7 @@ const Dashboard = ({
 
         // Update original customer's totalSpent and totalItems
         if (itemToTransfer) {
-          await updateDoc(doc(db, 'customers', orderData.customerId), {
+          await updateDoc(dbDoc('customers', orderData.customerId), {
             totalSpent: increment(-itemToTransfer.subtotal),
             totalItems: increment(-itemToTransfer.quantity)
           });
@@ -3143,13 +3145,13 @@ const Dashboard = ({
             updatedItems = [...targetOrder.items, { ...transferredItem, createdAt: now }];
           }
 
-          await updateDoc(doc(db, 'orders', targetOrder.id), {
+          await updateDoc(dbDoc('orders', targetOrder.id), {
             items: updatedItems,
             totalAmount: targetOrder.totalAmount + transferredItem.subtotal,
             updatedAt: now
           });
         } else {
-          await setDoc(doc(collection(db, 'orders')), {
+          await setDoc(dbDoc('orders'), {
             customerId: targetId,
             customerName: trimmedTarget,
             items: [{ ...transferredItem, createdAt: now }],
@@ -3159,7 +3161,7 @@ const Dashboard = ({
             updatedAt: now
           });
         }
-        await updateDoc(doc(db, 'customers', targetId!), {
+        await updateDoc(dbDoc('customers', targetId!), {
           totalSpent: increment(transferredItem.subtotal),
           totalItems: increment(transferredItem.quantity),
           lastOrderAt: new Date().toISOString()
@@ -3347,7 +3349,7 @@ const SettingsView = ({
         if (!isNaN(numV)) cleanedPriceMap[parseInt(k)] = numV;
       });
 
-      await updateDoc(doc(db, 'settings', 'global'), {
+      await updateDoc(dbDoc('settings', 'global'), {
         notificationTemplate: template,
         priceMap: cleanedPriceMap
       });
@@ -3564,9 +3566,9 @@ export default function App() {
       const batch = writeBatch(db);
       
       if (data.id) {
-        batch.update(doc(db, 'machines', data.id), updateData);
+        batch.update(dbDoc('machines', data.id), updateData);
       } else {
-        const newDocRef = doc(collection(db, 'machines'));
+        const newDocRef = dbDoc('machines');
         batch.set(newDocRef, { ...updateData, createdAt: now });
       }
 
@@ -3609,7 +3611,7 @@ export default function App() {
             if (diff !== 0) {
               customerDiffs[order.customerId] = (customerDiffs[order.customerId] || 0) + diff;
             }
-            batch.update(doc(db, 'orders', order.id), { 
+            batch.update(dbDoc('orders', order.id), { 
               items: newItems,
               totalAmount: newTotalAmount,
               customerName: order.customerName,
@@ -3619,7 +3621,7 @@ export default function App() {
         });
 
         Object.entries(customerDiffs).forEach(([customerId, diff]) => {
-          batch.update(doc(db, 'customers', customerId), {
+          batch.update(dbDoc('customers', customerId), {
             totalSpent: increment(diff)
           });
         });
@@ -3643,7 +3645,7 @@ export default function App() {
       onConfirm: async (checked?: boolean) => {
         try {
           const batch = writeBatch(db);
-          batch.delete(doc(db, 'machines', machineId));
+          batch.delete(dbDoc('machines', machineId));
 
           if (checked) {
             const affectedOrders = orders.filter(o => o.items.some(i => i.machineName === machineName));
@@ -3652,7 +3654,7 @@ export default function App() {
             affectedOrders.forEach(order => {
               const isOnlyItem = order.items.every(i => i.machineName === machineName);
               if (isOnlyItem) {
-                batch.delete(doc(db, 'orders', order.id));
+                batch.delete(dbDoc('orders', order.id));
                 customerDiffs[order.customerId] = customerDiffs[order.customerId] || { spent: 0, items: 0 };
                 customerDiffs[order.customerId].spent -= order.totalAmount;
                 customerDiffs[order.customerId].items -= order.items.reduce((s, i) => s + i.quantity, 0);
@@ -3662,7 +3664,7 @@ export default function App() {
                 const diffSpent = newTotal - order.totalAmount;
                 const diffItems = newItems.reduce((s, i) => s + i.quantity, 0) - order.items.reduce((s, i) => s + i.quantity, 0);
                 
-                batch.update(doc(db, 'orders', order.id), {
+                batch.update(dbDoc('orders', order.id), {
                   items: newItems,
                   totalAmount: newTotal
                 });
@@ -3674,7 +3676,7 @@ export default function App() {
             });
 
             Object.entries(customerDiffs).forEach(([customerId, diffs]) => {
-              batch.update(doc(db, 'customers', customerId), {
+              batch.update(dbDoc('customers', customerId), {
                 totalSpent: increment(diffs.spent),
                 totalItems: increment(diffs.items)
               });
@@ -3718,7 +3720,7 @@ export default function App() {
     // Test connection
     const testConnection = async () => {
       try {
-        await getDocFromServer(doc(db, 'settings', 'connection_test'));
+        await getDocFromServer(dbDoc('settings', 'connection_test'));
       } catch (error) {
         if (error instanceof Error && error.message.includes('the client is offline')) {
           console.error("Please check your Firebase configuration.");
@@ -3727,23 +3729,23 @@ export default function App() {
     };
     testConnection();
 
-    const unsubCustomers = onSnapshot(query(collection(db, 'customers'), orderBy('createdAt', 'desc')), (snap) => {
+    const unsubCustomers = onSnapshot(query(col('customers'), orderBy('createdAt', 'desc')), (snap) => {
       setCustomers(snap.docs.map(d => ({ id: d.id, ...d.data() } as Customer)));
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'customers'));
 
-    const unsubOrders = onSnapshot(query(collection(db, 'orders'), orderBy('createdAt', 'desc')), (snap) => {
+    const unsubOrders = onSnapshot(query(col('orders'), orderBy('createdAt', 'desc')), (snap) => {
       setOrders(snap.docs.map(d => ({ id: d.id, ...d.data() } as Order)));
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'orders'));
 
-    const unsubMachines = onSnapshot(query(collection(db, 'machines'), orderBy('name', 'asc')), (snap) => {
+    const unsubMachines = onSnapshot(query(col('machines'), orderBy('name', 'asc')), (snap) => {
       setMachines(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'machines'));
 
-    const unsubReleases = onSnapshot(query(collection(db, 'releases'), orderBy('createdAt', 'desc')), (snap) => {
+    const unsubReleases = onSnapshot(query(col('releases'), orderBy('createdAt', 'desc')), (snap) => {
       setReleases(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'releases'));
 
-    const unsubSettings = onSnapshot(doc(db, 'settings', 'global'), (snap) => {
+    const unsubSettings = onSnapshot(dbDoc('settings', 'global'), (snap) => {
       if (snap.exists()) {
         setSettings({ id: snap.id, ...snap.data() } as SystemSettings);
       } else {
@@ -3753,7 +3755,7 @@ export default function App() {
           priceMap: DEFAULT_PRICE_MAP,
           lastBackupAt: new Date().toISOString()
         };
-        setDoc(doc(db, 'settings', 'global'), defaultSettings).catch(err => handleFirestoreError(err, OperationType.WRITE, 'settings/global'));
+        setDoc(dbDoc('settings', 'global'), defaultSettings).catch(err => handleFirestoreError(err, OperationType.WRITE, 'settings/global'));
       }
     }, (err) => handleFirestoreError(err, OperationType.GET, 'settings/global'));
 
@@ -3846,19 +3848,19 @@ ${settings.notificationTemplate}`;
               // Import customers
               data.customers.forEach((c: any) => {
                 const { id, ...rest } = c;
-                batch.set(doc(db, 'customers', id), rest);
+                batch.set(dbDoc('customers', id), rest);
               });
               
               // Import orders
               data.orders.forEach((o: any) => {
                 const { id, ...rest } = o;
-                batch.set(doc(db, 'orders', id), rest);
+                batch.set(dbDoc('orders', id), rest);
               });
               
               // Import settings
               if (data.settings) {
                 const { id, ...rest } = data.settings;
-                batch.set(doc(db, 'settings', 'global'), rest);
+                batch.set(dbDoc('settings', 'global'), rest);
               }
               
               await batch.commit();
@@ -3884,8 +3886,8 @@ ${settings.notificationTemplate}`;
       onConfirm: async () => {
         try {
           const batch = writeBatch(db);
-          customers.forEach(c => batch.delete(doc(db, 'customers', c.id)));
-          orders.forEach(o => batch.delete(doc(db, 'orders', o.id)));
+          customers.forEach(c => batch.delete(dbDoc('customers', c.id)));
+          orders.forEach(o => batch.delete(dbDoc('orders', o.id)));
           await batch.commit();
           showToast('資料已清空。');
         } catch (err) {
