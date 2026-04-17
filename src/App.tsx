@@ -2324,15 +2324,24 @@ const CustomerDetailView = ({
     }
   }, [customer.id, customer.totalItems, customerOrders.length]);
 
-  const handleUpdateItem = async (orderId: string, updatedItem: OrderItem) => {
+  const handleUpdateItem = async (orderId: string, updatedItem: OrderItem & { rawIds?: string[] }) => {
     try {
       const order = orders.find(o => o.id === orderId);
       if (!order) return;
 
-      const oldItem = order.items.find(i => i.id === updatedItem.id);
-      const qtyDiff = updatedItem.quantity - (oldItem?.quantity || 0);
+      const rawIds = updatedItem.rawIds || [updatedItem.id];
+      const oldItems = order.items.filter(i => rawIds.includes(i.id));
+      const oldQty = oldItems.reduce((sum, i) => sum + i.quantity, 0);
+      const qtyDiff = updatedItem.quantity - oldQty;
 
-      const newItems = order.items.map(i => i.id === updatedItem.id ? updatedItem : i);
+      // Filter out all old raw items, then push the consolidated new item
+      const newItems = order.items.filter(i => !rawIds.includes(i.id));
+      const consolidatedItem = { ...updatedItem };
+      delete consolidatedItem.rawIds;
+      // We assign it the ID of the first raw item to keep continuity
+      consolidatedItem.id = rawIds[0];
+      newItems.push(consolidatedItem);
+      
       const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
 
       await updateDoc(dbDoc('orders', orderId), {
@@ -2358,6 +2367,8 @@ const CustomerDetailView = ({
   const handleTransfer = async () => {
     if (!transferringItem || !targetCustomerName.replace(/\s+/g, '') || transferQuantity < 1) return;
     const { orderId, item } = transferringItem;
+    // @ts-ignore
+    const rawIds = item.rawIds || [item.id];
     const trimmedTarget = targetCustomerName.replace(/\s+/g, '');
 
     if (trimmedTarget === customer.name.replace(/\s+/g, '')) {
@@ -2389,19 +2400,18 @@ const CustomerDetailView = ({
       if (!currentOrder) return;
 
       const transferSubtotal = item.price * transferQuantity;
-      let newItems = [...currentOrder.items];
       
-      if (transferQuantity === item.quantity) {
-        newItems = newItems.filter(i => i.id !== item.id);
-      } else {
-        const itemIdx = newItems.findIndex(i => i.id === item.id);
-        if (itemIdx > -1) {
-          newItems[itemIdx] = {
-            ...item,
-            quantity: item.quantity - transferQuantity,
-            subtotal: item.subtotal - transferSubtotal
-          };
-        }
+      // Filter out raw items to rebuild
+      let newItems = currentOrder.items.filter(i => !rawIds.includes(i.id));
+      
+      if (transferQuantity < item.quantity) {
+        // We push a consolidated remaining item to simplify logic
+        newItems.push({
+          ...item,
+          id: rawIds[0],
+          quantity: item.quantity - transferQuantity,
+          subtotal: item.subtotal - transferSubtotal
+        });
       }
       
       const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
@@ -2418,26 +2428,11 @@ const CustomerDetailView = ({
       // 3. Add to target customer's pending order or create new
       const targetOrder = orders.find(o => o.customerId === targetId && o.status === 'pending');
       const now = new Date().toISOString();
-      if (targetOrder) {
-        const existingItemIdx = targetOrder.items.findIndex(i => 
-          i.machineName === item.machineName && 
-          (i.variant || '') === (item.variant || '') && 
-          i.price === item.price
-        );
+      const transferredNewItem = { ...item, id: crypto.randomUUID(), quantity: transferQuantity, subtotal: transferSubtotal, createdAt: now };
+      delete transferredNewItem.rawIds;
 
-        let updatedItems;
-        if (existingItemIdx > -1) {
-          updatedItems = [...targetOrder.items];
-          const existingItem = updatedItems[existingItemIdx];
-          updatedItems[existingItemIdx] = {
-            ...existingItem,
-            quantity: existingItem.quantity + transferQuantity,
-            subtotal: existingItem.subtotal + transferSubtotal,
-            createdAt: now
-          };
-        } else {
-          updatedItems = [...targetOrder.items, { ...item, id: crypto.randomUUID(), quantity: transferQuantity, subtotal: transferSubtotal, createdAt: now }];
-        }
+      if (targetOrder) {
+        const updatedItems = [...targetOrder.items, transferredNewItem];
 
         await updateDoc(dbDoc('orders', targetOrder.id), {
           items: updatedItems,
@@ -2448,7 +2443,7 @@ const CustomerDetailView = ({
         await setDoc(dbDoc('orders'), {
           customerId: targetId,
           customerName: trimmedTarget,
-          items: [{ ...item, id: crypto.randomUUID(), quantity: transferQuantity, subtotal: transferSubtotal, createdAt: now }],
+          items: [transferredNewItem],
           totalAmount: transferSubtotal,
           status: 'pending',
           createdAt: now,
@@ -2469,14 +2464,15 @@ const CustomerDetailView = ({
     }
   };
 
-  const handleReleaseToggle = async (orderId: string, item: OrderItem) => {
+  const handleReleaseToggle = async (orderId: string, item: OrderItem & { rawIds?: string[] }) => {
     try {
-      const existing = releases.find(r => r.orderId === orderId && r.itemId === item.id && r.status === 'pending');
+      const rawIds = item.rawIds || [item.id];
+      const existing = releases.find(r => r.orderId === orderId && rawIds.includes(r.itemId) && r.status === 'pending');
       if (existing) {
         await deleteDoc(dbDoc('releases', existing.id));
         showToast('已取消釋出');
       } else {
-        setReleasingItem({ orderId, item });
+        setReleasingItem({ orderId, item: { ...item, id: rawIds[0] } });
         setReleaseQuantity(item.quantity);
       }
     } catch (err) {
@@ -2508,6 +2504,37 @@ const CustomerDetailView = ({
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'releases');
     }
+  };
+
+  const groupOrderItems = (order: Order) => {
+    const grouped: (OrderItem & { rawIds: string[] })[] = [];
+    order.items.forEach(item => {
+      const isReleased = releases.some(r => r.orderId === order.id && r.itemId === item.id && r.status === 'pending');
+      
+      // If it's released, do not group it, push it individually
+      if (isReleased) {
+        grouped.push({ ...item, rawIds: [item.id] });
+        return;
+      }
+
+      // Find an existing unreleased group with the same machine, variant, price.
+      const existing = grouped.find(g => 
+        // Ensure the existing group we are adding to is also NOT released
+        !g.rawIds.some(rawId => releases.some(r => r.orderId === order.id && r.itemId === rawId && r.status === 'pending')) &&
+        g.machineName === item.machineName && 
+        (g.variant || '') === (item.variant || '') && 
+        g.price === item.price
+      );
+
+      if (existing) {
+        existing.quantity += item.quantity;
+        existing.subtotal += item.subtotal;
+        existing.rawIds.push(item.id);
+      } else {
+        grouped.push({ ...item, rawIds: [item.id] });
+      }
+    });
+    return grouped;
   };
 
   return (
@@ -2567,45 +2594,49 @@ const CustomerDetailView = ({
       </header>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-6 pb-32">
-        {customerOrders.map(order => (
-          <div key={order.id} className="bg-card-white p-6 rounded-3xl card-shadow border-l-4 border-primary-blue">
-            <div className="flex justify-between items-center mb-4">
-              <span className="text-xs font-bold text-ink/40">{order.createdAt ? format(toZonedTime(new Date(order.createdAt), TAIWAN_TZ), 'yyyy/MM/dd HH:mm') : '無日期'}</span>
-              <button 
-                onClick={() => {
-                  setConfirmModal({
-                    show: true,
-                    title: '刪除訂單',
-                    message: `確定要刪除這筆訂單嗎？`,
-                    type: 'danger',
-                    onConfirm: async () => {
-                      try {
-                        await deleteDoc(dbDoc('orders', order.id));
-                        
-                        // Update customer stats
-                        await updateDoc(dbDoc('customers', order.customerId), {
-                          totalSpent: increment(-order.totalAmount),
-                          totalItems: increment(-order.items.reduce((sum, i) => sum + i.quantity, 0))
-                        });
+        {customerOrders.map(order => {
+          const groupedItems = groupOrderItems(order);
+          return (
+            <div key={order.id} className="bg-card-white p-6 rounded-3xl card-shadow border-l-4 border-primary-blue">
+              <div className="flex justify-between items-center mb-4">
+                <span className="text-xs font-bold text-ink/40">{order.createdAt ? format(toZonedTime(new Date(order.createdAt), TAIWAN_TZ), 'yyyy/MM/dd HH:mm') : '無日期'}</span>
+                <button 
+                  onClick={() => {
+                    setConfirmModal({
+                      show: true,
+                      title: '刪除訂單',
+                      message: `確定要刪除這筆訂單嗎？`,
+                      type: 'danger',
+                      onConfirm: async () => {
+                        try {
+                          await deleteDoc(dbDoc('orders', order.id));
+                          
+                          // Update customer stats
+                          await updateDoc(dbDoc('customers', order.customerId), {
+                            totalSpent: increment(-order.totalAmount),
+                            totalItems: increment(-order.items.reduce((sum, i) => sum + i.quantity, 0))
+                          });
 
-                        showToast('訂單已刪除');
-                      } catch (err) {
-                        handleFirestoreError(err, OperationType.DELETE, `orders/${order.id}`);
+                          showToast('訂單已刪除');
+                        } catch (err) {
+                          handleFirestoreError(err, OperationType.DELETE, `orders/${order.id}`);
+                        }
                       }
-                    }
-                  });
-                }}
-                className="p-2 text-red-400 hover:bg-red-50 rounded-xl transition-colors"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="space-y-4">
-              {order.items.map(item => {
-                const isReleased = releases.some(r => r.orderId === order.id && r.itemId === item.id && r.status === 'pending');
-                const machine = machines.find(m => m.name === item.machineName);
-                return (
-                  <div key={item.id} className="flex flex-col gap-2 p-4 bg-background rounded-2xl relative group">
+                    });
+                  }}
+                  className="p-2 text-red-400 hover:bg-red-50 rounded-xl transition-colors"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="space-y-4">
+                {groupedItems.map((item, idx) => {
+                  // For grouped items, we just check if ANY of their raw items has a pending release.
+                  // Since all raw items in the group have the same machine & variant, it's safe to visually track the first one
+                  const isReleased = item.rawIds.some(rawId => releases.some(r => r.orderId === order.id && r.itemId === rawId && r.status === 'pending'));
+                  const machine = machines.find(m => m.name === item.machineName);
+                  return (
+                    <div key={`${item.id}-${idx}`} className="flex flex-col gap-2 p-4 bg-background rounded-2xl relative group">
                     <div className="flex justify-between items-start">
                       <div className="flex gap-3">
                         <div 
@@ -2684,7 +2715,7 @@ const CustomerDetailView = ({
                           isReleased ? "bg-orange-500 text-white" : "bg-card-white text-ink/60"
                         )}
                       >
-                        <LogOut className="w-3 h-3" /> {isReleased ? `取消釋出 (${releases.find(r => r.orderId === order.id && r.itemId === item.id && r.status === 'pending')?.quantity})` : '釋出'}
+                        <LogOut className="w-3 h-3" /> {isReleased ? `取消釋出 (${releases.find(r => r.orderId === order.id && item.rawIds.includes(r.itemId) && r.status === 'pending')?.quantity})` : '釋出'}
                       </button>
                     </div>
                   </div>
@@ -2692,7 +2723,8 @@ const CustomerDetailView = ({
               })}
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Edit Modal */}
@@ -2756,7 +2788,10 @@ const CustomerDetailView = ({
                         onConfirm: async () => {
                           const order = orders.find(o => o.id === editingItem.orderId);
                           if (!order) return;
-                          const newItems = order.items.filter(i => i.id !== editingItem.item.id);
+                          
+                          const rawIds = (editingItem.item as any).rawIds || [editingItem.item.id];
+                          const newItems = order.items.filter(i => !rawIds.includes(i.id));
+                          
                           const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
                           
                           try {
@@ -3159,25 +3194,7 @@ const Dashboard = ({
         const targetOrder = orders.find(o => o.customerId === targetId && o.status === 'pending');
         const now = new Date().toISOString();
         if (targetOrder) {
-          const existingItemIdx = targetOrder.items.findIndex(i => 
-            i.machineName === transferredItem.machineName && 
-            (i.variant || '') === (transferredItem.variant || '') && 
-            i.price === transferredItem.price
-          );
-
-          let updatedItems;
-          if (existingItemIdx > -1) {
-            updatedItems = [...targetOrder.items];
-            const existingItem = updatedItems[existingItemIdx];
-            updatedItems[existingItemIdx] = {
-              ...existingItem,
-              quantity: existingItem.quantity + transferredItem.quantity,
-              subtotal: (existingItem.quantity + transferredItem.quantity) * existingItem.price,
-              createdAt: now
-            };
-          } else {
-            updatedItems = [...targetOrder.items, { ...transferredItem, createdAt: now }];
-          }
+          const updatedItems = [...targetOrder.items, { ...transferredItem, createdAt: now }];
 
           await updateDoc(dbDoc('orders', targetOrder.id), {
             items: updatedItems,
@@ -3809,11 +3826,29 @@ export default function App() {
     onAfterPrint: () => setIsPrinting(false),
   });
 
+  const groupItemsHelper = (items: OrderItem[]) => {
+    const grouped: OrderItem[] = [];
+    items.forEach(item => {
+      const existing = grouped.find(g => 
+        g.machineName === item.machineName && 
+        (g.variant || '') === (item.variant || '') && 
+        g.price === item.price
+      );
+      if (existing) {
+        existing.quantity += item.quantity;
+        existing.subtotal += item.subtotal;
+      } else {
+        grouped.push({ ...item });
+      }
+    });
+    return grouped;
+  };
+
   const copyCustomerNotification = (customer: Customer) => {
     if (!settings) return;
     
     const customerOrders = orders.filter(o => o.customerId === customer.id);
-    const allItems = customerOrders.flatMap(o => o.items);
+    const allItems = groupItemsHelper(customerOrders.flatMap(o => o.items));
     
     const itemsText = allItems.map(i => `${i.machineName} ${i.variant ? `(${i.variant})` : ''} x ${i.quantity} $${i.subtotal}`).join('\n');
     
@@ -3835,7 +3870,8 @@ ${settings.notificationTemplate}`;
   const copyNotification = (order: Order) => {
     if (!settings) return;
     
-    const itemsText = order.items.map(i => `${i.machineName} ${i.variant ? `(${i.variant})` : ''} x ${i.quantity} $${i.subtotal}`).join('\n');
+    const groupedItems = groupItemsHelper(order.items);
+    const itemsText = groupedItems.map(i => `${i.machineName} ${i.variant ? `(${i.variant})` : ''} x ${i.quantity} $${i.subtotal}`).join('\n');
     
     const upperPart = `親愛的 ${order.customerName} 您好，
 您本次的連線購物明細如下：
@@ -4157,7 +4193,7 @@ ${settings.notificationTemplate}`;
                     </tr>
                   </thead>
                   <tbody>
-                    {selectedOrder.items.map((item, idx) => (
+                    {selectedOrder.items && groupItemsHelper(selectedOrder.items).map((item, idx) => (
                       <tr key={idx} className="border-b border-gray-200">
                         <td className="text-center py-2 align-middle">
                           <div className="w-4 h-4 border-2 border-black rounded-sm mx-auto"></div>
