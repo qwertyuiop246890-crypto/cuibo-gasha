@@ -1008,6 +1008,7 @@ const OrdersList = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
   const [dateFilter, setDateFilter] = useState('');
+  const [dateFilterType, setDateFilterType] = useState<'createdAt' | 'updatedAt'>('createdAt');
   const [editingItem, setEditingItem] = useState<{ orderId: string, item: OrderItem } | null>(null);
 
   const handleUpdateItem = async (orderId: string, updatedItem: OrderItem) => {
@@ -1017,6 +1018,9 @@ const OrdersList = ({
 
       const oldItem = order.items.find(i => i.id === updatedItem.id);
       const qtyDiff = updatedItem.quantity - (oldItem?.quantity || 0);
+
+      // 設定 updatedAt
+      updatedItem.updatedAt = new Date().toISOString();
 
       const newItems = order.items.map(i => i.id === updatedItem.id ? updatedItem : i);
       const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
@@ -1052,7 +1056,7 @@ const OrdersList = ({
 
       await updateDoc(dbDoc('orders', orderId), {
         items: newItems,
-        updatedAt: new Date().toISOString()
+        // no update to order updatedAt due to simple checkbox toggle, or optionally add later
       });
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
@@ -1066,7 +1070,7 @@ const OrdersList = ({
       orderId: order.id,
       customerName: order.customerName,
       customerId: order.customerId,
-      orderTime: item.createdAt || order.createdAt || new Date().toISOString()
+      orderTime: dateFilterType === 'createdAt' ? (item.createdAt || order.createdAt || new Date().toISOString()) : (item.updatedAt || item.createdAt || order.createdAt || new Date().toISOString())
     }))
   );
 
@@ -1100,7 +1104,15 @@ const OrdersList = ({
             onChange={(e) => setSearchTerm(e.target.value)}
           />
         </div>
-        <div className="flex flex-row gap-4">
+        <div className="flex flex-row flex-wrap gap-4">
+          <select
+            value={dateFilterType}
+            onChange={(e) => setDateFilterType(e.target.value as 'createdAt' | 'updatedAt')}
+            className="px-4 py-3 bg-background rounded-xl border-none text-ink cursor-pointer outline-none focus:ring-2 focus:ring-primary-blue"
+          >
+            <option value="createdAt">依照建立日期</option>
+            <option value="updatedAt">依照編輯日期</option>
+          </select>
           <input 
             type="date" 
             className="px-4 py-3 bg-background rounded-xl border-none text-ink cursor-pointer outline-none focus:ring-2 focus:ring-primary-blue"
@@ -1109,7 +1121,7 @@ const OrdersList = ({
           />
           <button
             onClick={() => setSortOrder(prev => prev === 'desc' ? 'asc' : 'desc')}
-            className="flex items-center gap-2 px-4 py-3 bg-background rounded-xl text-ink font-medium whitespace-nowrap hover:bg-ink/5 transition-colors"
+            className="flex items-center justify-center gap-2 px-4 py-3 bg-background rounded-xl text-ink font-medium whitespace-nowrap hover:bg-ink/5 transition-colors"
           >
             <ArrowRightLeft className="w-4 h-4 rotate-90" />
             {sortOrder === 'desc' ? '由新到舊' : '由舊到新'}
@@ -1343,6 +1355,36 @@ const CustomersList = ({
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [sortBy, setSortBy] = useState<'name' | 'spent' | 'lastOrder'>('lastOrder');
+  const [showSimilarModal, setShowSimilarModal] = useState(false);
+  const [similarPairs, setSimilarPairs] = useState<[Customer, Customer][]>([]);
+
+  const isSimilarName = (name1: string, name2: string) => {
+    const n1 = name1.toLowerCase().replace(/\s+/g, ' ');
+    const n2 = name2.toLowerCase().replace(/\s+/g, ' ');
+    if (n1 === n2) return true;
+    if (n1.length >= 2 && n2.length >= 2) {
+      if (n1.includes(n2) || n2.includes(n1)) return true;
+      let matches = 0;
+      for (const char of n1) {
+        if (n2.includes(char)) matches++;
+      }
+      if (matches >= 2 && matches / Math.max(n1.length, n2.length) > 0.6) return true;
+    }
+    return false;
+  };
+
+  const handleCheckSimilar = () => {
+    const pairs: [Customer, Customer][] = [];
+    for (let i = 0; i < customers.length; i++) {
+      for (let j = i + 1; j < customers.length; j++) {
+        if (isSimilarName(customers[i].name, customers[j].name)) {
+          pairs.push([customers[i], customers[j]]);
+        }
+      }
+    }
+    setSimilarPairs(pairs);
+    setShowSimilarModal(true);
+  };
 
   const handleSyncAllStats = async () => {
     try {
@@ -1398,6 +1440,13 @@ const CustomersList = ({
           />
         </div>
         <div className="flex items-center gap-2">
+          <button 
+            onClick={handleCheckSimilar}
+            className="p-4 bg-card-white text-orange-500 rounded-2xl card-shadow flex-shrink-0 hover:bg-orange-50 transition-colors"
+            title="檢查高度相似名稱"
+          >
+            <Users className="w-5 h-5" />
+          </button>
           <button 
             onClick={handleSyncAllStats}
             className="p-4 bg-card-white text-primary-blue rounded-2xl card-shadow flex-shrink-0 hover:bg-primary-blue/5 transition-colors"
@@ -1518,6 +1567,53 @@ const CustomersList = ({
           ))}
         </div>
       )}
+      
+      {/* Similar Names Modal */}
+      <AnimatePresence>
+        {showSimilarModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-ink/20 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-card-white rounded-3xl p-6 w-full max-w-lg card-shadow max-h-[80vh] flex flex-col"
+            >
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-xl font-bold text-ink">高度相似顧客名稱</h3>
+                <button onClick={() => setShowSimilarModal(false)} className="p-2 bg-background rounded-full hover:bg-ink/5">
+                  <X className="w-5 h-5 text-ink/60" />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto pr-2 space-y-4">
+                {similarPairs.length > 0 ? (
+                  similarPairs.map((pair, idx) => (
+                    <div key={idx} className="p-4 bg-background rounded-2xl flex flex-col gap-3">
+                      <p className="text-sm font-bold text-ink/80 border-b border-divider pb-2">發現疑似重複顧客</p>
+                      <div className="space-y-2">
+                        <div className="flex justify-between items-center">
+                          <span className="font-bold text-ink">{pair[0].name}</span>
+                          <span className="text-xs text-ink/40">NT${pair[0].totalSpent}</span>
+                        </div>
+                        <div className="flex justify-between items-center">
+                          <span className="font-bold text-ink">{pair[1].name}</span>
+                          <span className="text-xs text-ink/40">NT${pair[1].totalSpent}</span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-ink/40 mt-2">請確認是否為同一人。如需合併，請點擊顧客卡片上的「編輯」按鈕修改名稱。</p>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-center py-8">
+                    <UserIcon className="w-12 h-12 text-ink/10 mx-auto mb-3" />
+                    <p className="text-ink/60 font-bold">目前沒有發現高度相似的顧客名稱</p>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
@@ -2358,7 +2454,7 @@ const CustomerDetailView = ({
 
       // Filter out all old raw items, then push the consolidated new item
       const newItems = order.items.filter(i => !rawIds.includes(i.id));
-      const consolidatedItem = { ...updatedItem };
+      const consolidatedItem = { ...updatedItem, updatedAt: new Date().toISOString() };
       delete consolidatedItem.rawIds;
       // We assign it the ID of the first raw item to keep continuity
       consolidatedItem.id = rawIds[0];
@@ -3054,7 +3150,18 @@ const PrintPreview = ({
             <div className="space-y-8 print:space-y-0">
               {customers.filter(c => selectedIds.includes(c.id)).map(customer => {
                 const custOrders = orders.filter(o => o.customerId === customer.id);
-                const allItems = custOrders.flatMap(o => o.items);
+                let allItems = custOrders.flatMap(o => o.items);
+                
+                // 依照商品的名稱排序 同樣的機台優先排在一起 然後時間由舊到新
+                allItems.sort((a, b) => {
+                  if (a.machineName === b.machineName) {
+                    const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+                    const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+                    return aTime - bTime;
+                  }
+                  return a.machineName.localeCompare(b.machineName, 'zh-Hant');
+                });
+                
                 const isLongOrder = allItems.length > 12;
 
                 return (
