@@ -426,9 +426,24 @@ const CreateOrder = ({
       const base64String = compressedDataUrl.split(',')[1];
       setUploadedImage(compressedDataUrl);
       
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+      const apiKeys = [
+        process.env.GEMINI_API_KEY,
+        process.env.GEMINI_API_KEY_2,
+        process.env.GEMINI_API_KEY_3,
+        process.env.GEMINI_API_KEY_4,
+        process.env.GEMINI_API_KEY_5
+      ].filter(Boolean) as string[];
       
-      const response = await ai.models.generateContent({
+      let response;
+      let aiError;
+      const shuffledKeys = apiKeys.sort(() => Math.random() - 0.5);
+      if (shuffledKeys.length === 0) throw new Error("No Gemini API keys configured");
+
+      for (const key of shuffledKeys) {
+        try {
+          const ai = new GoogleGenAI({ apiKey: key });
+      
+          response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: [
           {
@@ -488,7 +503,14 @@ const CreateOrder = ({
             }
           }
         }
-      });
+        });
+        break; // success
+        } catch (err: any) {
+             console.warn("API Error with a key, trying next... ", err?.message);
+             aiError = err;
+        }
+      }
+      if (!response) throw aiError || new Error("All API keys failed.");
 
       const text = response.text;
       if (text) {
