@@ -3811,14 +3811,15 @@ const SettingsView = ({
       <div className="bg-card-white p-6 rounded-3xl card-shadow">
         <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest mb-4">系統維護</h3>
         <div className="grid grid-cols-2 gap-3">
-          <button className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors">
+          <button onClick={exportData} className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors">
             <Download className="w-5 h-5" />
             <span className="text-[10px] font-bold">匯出資料</span>
           </button>
-          <button className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors">
+          <label className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors cursor-pointer">
+            <input type="file" accept=".json" className="hidden" onChange={importData} />
             <Upload className="w-5 h-5" />
             <span className="text-[10px] font-bold">匯入資料</span>
-          </button>
+          </label>
           <button 
             onClick={clearAllData}
             className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-red-500/60 hover:bg-red-500/5 transition-colors"
