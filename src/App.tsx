@@ -405,47 +405,9 @@ const CreateOrder = ({
         });
       };
 
-      const calculateHash = (dataUrl: string): Promise<string> => {
-        return new Promise((resolve) => {
-          if (!dataUrl) { resolve(''); return; }
-          const img = new Image();
-          img.onload = () => {
-            const canvas = document.createElement('canvas');
-            canvas.width = 9;
-            canvas.height = 8;
-            const ctx = canvas.getContext('2d');
-            if (!ctx) { resolve(''); return; }
-            ctx.drawImage(img, 0, 0, 9, 8);
-            const data = ctx.getImageData(0, 0, 9, 8).data;
-            let hash = '';
-            for (let y = 0; y < 8; y++) {
-              for (let x = 0; x < 8; x++) {
-                const idx1 = (y * 9 + x) * 4;
-                const idx2 = (y * 9 + x + 1) * 4;
-                const luma1 = data[idx1] * 0.299 + data[idx1 + 1] * 0.587 + data[idx1 + 2] * 0.114;
-                const luma2 = data[idx2] * 0.299 + data[idx2 + 1] * 0.587 + data[idx2 + 2] * 0.114;
-                hash += luma1 > luma2 ? '1' : '0';
-              }
-            }
-            resolve(hash);
-          };
-          img.onerror = () => resolve('');
-          img.src = dataUrl;
-        });
-      };
-
-      const hashDistance = (h1: string, h2: string): number => {
-        if (!h1 || !h2 || h1.length !== 64 || h2.length !== 64) return 64;
-        let diff = 0;
-        for (let i = 0; i < 64; i++) {
-          if (h1[i] !== h2[i]) diff++;
-        }
-        return diff;
-      };
-
       const compressedDataUrl = await compressImage(file);
       
-      // 檢查是否已經上傳過相同的圖片 (精確匹配)
+      // 檢查是否已經上傳過相同的圖片
       const existingMachineByImg = machines.find(m => m.imageUrl === compressedDataUrl);
       if (existingMachineByImg) {
         setMachineName(existingMachineByImg.name);
@@ -461,69 +423,12 @@ const CreateOrder = ({
         return;
       }
 
-      // 進階檢查：相似度高達 90% 以上 (差異 <= 6)
-      const targetHash = await calculateHash(compressedDataUrl);
-      if (targetHash) {
-        const hashPromises = machines.map(async (m) => {
-          if (m.imageUrl) {
-            const h = await calculateHash(m.imageUrl);
-            return { machine: m, hash: h };
-          }
-          return null;
-        });
-        const hashes = await Promise.all(hashPromises);
-        
-        let bestMatch = null;
-        let lowestDist = 64;
-        for (const item of hashes) {
-          if (item && item.hash) {
-            const dist = hashDistance(targetHash, item.hash);
-            if (dist < lowestDist) {
-              lowestDist = dist;
-              bestMatch = item.machine;
-            }
-          }
-        }
-
-        if (bestMatch && lowestDist <= 6) {
-          const useSame = window.confirm(`發現資料庫有相似度極高(>90%)的圖片對應機台「${bestMatch.name}」，是否直接套用該機台的資訊？`);
-          if (useSame) {
-            setMachineName(bestMatch.name);
-            setPrice(bestMatch.defaultPrice);
-            if (bestMatch.variants && bestMatch.variants.length > 0) {
-              setOrderItems(bestMatch.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
-            } else {
-              setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
-            }
-            setUploadedImage(compressedDataUrl);
-            showToast('已載入相似圖片的機台資料！', 'success');
-            setIsAnalyzing(false);
-            return;
-          }
-        }
-      }
-
       const base64String = compressedDataUrl.split(',')[1];
       setUploadedImage(compressedDataUrl);
       
-      const apiKeys = [
-        process.env.GEMINI_API_KEY,
-        process.env.GEMINI_API_KEY_2,
-        process.env.GEMINI_API_KEY_3,
-        process.env.GEMINI_API_KEY_4,
-        process.env.GEMINI_API_KEY_5
-      ].filter(Boolean) as string[];
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
       
-      let response;
-      let aiError;
-      const shuffledKeys = apiKeys.sort(() => Math.random() - 0.5);
-      if (shuffledKeys.length === 0) throw new Error("No Gemini API keys configured");
-
-      for (const key of shuffledKeys) {
-        try {
-          const ai = new GoogleGenAI({ apiKey: key });
-      
-          response = await ai.models.generateContent({
+      const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: [
           {
@@ -583,14 +488,7 @@ const CreateOrder = ({
             }
           }
         }
-        });
-        break; // success
-        } catch (err: any) {
-             console.warn("API Error with a key, trying next... ", err?.message);
-             aiError = err;
-        }
-      }
-      if (!response) throw aiError || new Error("All API keys failed.");
+      });
 
       const text = response.text;
       if (text) {
@@ -601,30 +499,17 @@ const CreateOrder = ({
         const existingMachineByName = machines.find(m => m.name === aiMachineName);
         
         if (existingMachineByName) {
-          const useSameSpecs = window.confirm(`AI 辨識此圖片屬於資料庫已有的機台「${aiMachineName}」，是否直接套用資料庫內的規格與預設價錢？\n（若取消則套用 AI 辨識的新規格）`);
-          
-          if (useSameSpecs) {
-            setMachineName(existingMachineByName.name);
-            setPrice(existingMachineByName.defaultPrice);
-            if (existingMachineByName.variants && existingMachineByName.variants.length > 0) {
-              setOrderItems(existingMachineByName.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
-            } else {
-              setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
-            }
-            showToast('已載入同名機台的現有資料！', 'success');
+          setMachineName(existingMachineByName.name);
+          setPrice(existingMachineByName.defaultPrice);
+          // 如果 AI 有辨識出款式，優先使用 AI 辨識的款式作為當前訂單項目
+          if (result.variants && result.variants.length > 0) {
+            setOrderItems(result.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
+          } else if (result.variant) {
+            setOrderItems([{ id: crypto.randomUUID(), variant: result.variant, quantity: 1, isEco: false }]);
           } else {
-            setMachineName(existingMachineByName.name);
-            setPrice(existingMachineByName.defaultPrice);
-            // 如果 AI 有辨識出款式，優先使用 AI 辨識的款式作為當前訂單項目
-            if (result.variants && result.variants.length > 0) {
-              setOrderItems(result.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
-            } else if (result.variant) {
-              setOrderItems([{ id: crypto.randomUUID(), variant: result.variant, quantity: 1, isEco: false }]);
-            } else {
-              setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
-            }
-            showToast('已載入 AI 辨識的項目！', 'success');
+            setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
           }
+          showToast('已載入同名機台的現有資料！', 'success');
         } else {
           if (aiMachineName) setMachineName(aiMachineName);
           if (result.variants && result.variants.length > 0) {
