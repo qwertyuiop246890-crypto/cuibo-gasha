@@ -64,8 +64,10 @@ service cloud.firestore {
 
     function isAdmin() {
       return isAuthenticated() &&
-        (request.auth.token.email in ["qwertyuiop246890@gmail.com", "cuibo.buy@gmail.com"] && 
-         (request.auth.token.email_verified == true || !('email_verified' in request.auth.token)));
+        ('email' in request.auth.token) &&
+        (request.auth.token.email == "qwertyuiop246890@gmail.com" || 
+         request.auth.token.email == "cuibo.buy@gmail.com") && 
+        (request.auth.token.email_verified == true || !('email_verified' in request.auth.token));
     }
 
     function hasRequiredFields(fields) {

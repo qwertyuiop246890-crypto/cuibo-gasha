@@ -1,0 +1,27 @@
+4060-        }
+4061-      }
+4062-    };
+4063-    testConnection();
+4064-
+4065:    const unsubCustomers = onSnapshot(query(col('customers'), orderBy('createdAt', 'desc')), (snap) => {
+4066-      setCustomers(snap.docs.map(d => ({ id: d.id, ...d.data() } as Customer)));
+4067-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'customers'));
+4068-
+4069:    const unsubOrders = onSnapshot(query(col('orders'), orderBy('createdAt', 'desc')), (snap) => {
+4070-      setOrders(snap.docs.map(d => ({ id: d.id, ...d.data() } as Order)));
+4071-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'orders'));
+4072-
+4073:    const unsubMachines = onSnapshot(query(col('machines'), orderBy('name', 'asc')), (snap) => {
+4074-      setMachines(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+4075-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'machines'));
+4076-
+4077:    const unsubReleases = onSnapshot(query(col('releases'), orderBy('createdAt', 'desc')), (snap) => {
+4078-      setReleases(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+4079-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'releases'));
+4080-
+4081:    const unsubSettings = onSnapshot(dbDoc('settings', 'global'), (snap) => {
+4082-      if (snap.exists()) {
+4083-        setSettings({ id: snap.id, ...snap.data() } as SystemSettings);
+4084-      } else {
+4085-        // Initialize default settings
+4086-        const defaultSettings: Omit<SystemSettings, 'id'> = {
