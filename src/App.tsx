@@ -73,6 +73,7 @@ const handleFirestoreError = (error: unknown, operationType: OperationType, path
     path
   };
   console.error('Firestore Error: ', JSON.stringify(errInfo));
+  window.dispatchEvent(new CustomEvent('firestore-error', { detail: errInfo }));
   throw new Error(JSON.stringify(errInfo));
 };
 
@@ -99,12 +100,14 @@ class ErrorBoundary extends React.Component<any, any> {
   render() {
     if (this.state.hasError) {
       let displayMessage = "應用程式發生錯誤。";
+      let isQuotaError = false;
       try {
         const parsed = JSON.parse(this.state.errorInfo || "");
         if (parsed.error && parsed.error.includes("insufficient permissions")) {
           displayMessage = `權限不足：無法執行 ${parsed.operationType} 操作於 ${parsed.path}。請確認您是否為管理員。`;
-        } else if (parsed.error && (parsed.error.includes("Quota exceeded") || parsed.error.includes("quota-exceeded"))) {
-          displayMessage = `資料庫免費額度已滿：無法連線至雲端。如果想繼續使用，請到設定將「自動同步到 Firebase」關閉（切換為本地模式），或等待明天額度恢復。`;
+        } else if (parsed.error && (parsed.error.toLowerCase().includes("quota") || parsed.error.includes("Quota exceeded") || parsed.error.includes("quota-exceeded"))) {
+          isQuotaError = true;
+          displayMessage = `資料庫免費額度已滿：無法連線至雲端。如果要繼續編輯資料，請點擊下方的「切換為本地模式」按鈕，系統會將後續的更動儲存在您的裝置中，不影響您繼續使用。`;
         }
       } catch (e) {
         displayMessage = this.state.errorInfo || "發生未知錯誤。";
@@ -115,13 +118,26 @@ class ErrorBoundary extends React.Component<any, any> {
           <div className="max-w-md w-full bg-card-white p-8 rounded-3xl card-shadow text-center">
             <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-6" />
             <h2 className="text-2xl font-bold text-ink mb-4">糟糕！出錯了</h2>
-            <p className="text-ink/60 mb-8">{displayMessage}</p>
-            <button 
-              onClick={() => window.location.reload()}
-              className="w-full py-4 bg-primary-blue text-white rounded-2xl font-bold shadow-lg shadow-primary-blue/30"
-            >
-              重新整理頁面
-            </button>
+            <p className="text-ink/60 mb-8 leading-relaxed">{displayMessage}</p>
+            <div className="flex flex-col gap-3">
+              {isQuotaError && (
+                <button 
+                  onClick={() => {
+                    localStorage.setItem('cuibo_gasha_autosync', 'false');
+                    window.location.reload();
+                  }}
+                  className="w-full py-4 bg-orange-500 text-white rounded-2xl font-bold shadow-lg shadow-orange-500/30 mb-2"
+                >
+                  切換為本地模式並繼續使用
+                </button>
+              )}
+              <button 
+                onClick={() => window.location.reload()}
+                className="w-full py-4 bg-primary-blue text-white rounded-2xl font-bold shadow-lg shadow-primary-blue/30"
+              >
+                重新整理頁面
+              </button>
+            </div>
           </div>
         </div>
       );
@@ -317,7 +333,7 @@ const BottomNav = ({ activeTab, setActiveTab }: { activeTab: string, setActiveTa
   ];
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-40 bg-card-white border-t border-divider pb-safe shadow-2xl">
+    <nav className="fixed bottom-0 left-0 right-0 z-40 bg-card-white border-t border-divider pb-[env(safe-area-inset-bottom)] shadow-2xl">
       <div className="flex items-center justify-around py-1 sm:justify-center sm:gap-12">
         {navItems.map((item) => (
           <button
@@ -759,7 +775,9 @@ const CreateOrder = ({
             createdAt: now,
             lastOrderAt: now
           };
-          await setDoc(newCustRef, newCust);
+          setDoc(newCustRef, newCust).catch(err => {
+            try { handleFirestoreError(err, OperationType.CREATE, 'customers'); } catch(e){}
+          });
           customerId = newCustRef.id;
           customer = { id: customerId, ...newCust };
         }
@@ -794,10 +812,12 @@ const CreateOrder = ({
 
       if (totalAddedQuantity > 0 && customerId) {
         if (existingOrder) {
-          await updateDoc(dbDoc('orders', existingOrder.id), {
+          updateDoc(dbDoc('orders', existingOrder.id), {
             items: updatedItems,
             totalAmount: existingOrder.totalAmount + totalAddedAmount,
             updatedAt: now
+          }).catch(err => {
+            try { handleFirestoreError(err, OperationType.UPDATE, `orders/${existingOrder!.id}`); } catch(e){}
           });
         } else {
           // Create new order
@@ -811,14 +831,18 @@ const CreateOrder = ({
             createdAt: now,
             updatedAt: now
           };
-          await setDoc(orderRef, newOrder);
+          setDoc(orderRef, newOrder).catch(err => {
+            try { handleFirestoreError(err, OperationType.CREATE, 'orders'); } catch(e){}
+          });
         }
         
         // 3. Update customer stats
-        await updateDoc(dbDoc('customers', customerId!), {
+        updateDoc(dbDoc('customers', customerId!), {
           totalSpent: increment(totalAddedAmount),
           totalItems: increment(totalAddedQuantity),
           lastOrderAt: now
+        }).catch(err => {
+            try { handleFirestoreError(err, OperationType.UPDATE, `customers/${customerId}`); } catch(e){}
         });
       }
 
@@ -834,13 +858,15 @@ const CreateOrder = ({
           updates.imageUrl = uploadedImage;
         }
         if (Object.keys(updates).length > 1) { // more than just updatedAt
-          await updateDoc(dbDoc('machines', machine.id), updates);
+          updateDoc(dbDoc('machines', machine.id), updates).catch(err => {
+            try { handleFirestoreError(err, OperationType.UPDATE, `machines/${machine.id}`); } catch(e){}
+          });
         }
       } else {
         const machineRef = dbDoc('machines');
         const newMachine: any = {
           name: machineName,
-          defaultPrice: parseInt(price) || 0,
+          defaultPrice: parseInt(price as any) || 0,
           variants: Array.from(newVariantsToSave),
           createdAt: now,
           updatedAt: now
@@ -848,7 +874,9 @@ const CreateOrder = ({
         if (uploadedImage) {
           newMachine.imageUrl = uploadedImage;
         }
-        await setDoc(machineRef, newMachine);
+        setDoc(machineRef, newMachine).catch(err => {
+            try { handleFirestoreError(err, OperationType.CREATE, 'machines'); } catch(e){}
+        });
       }
 
       showToast(totalAddedQuantity > 0 ? '訂單已更新/建立！' : '機台資料已建立！');
@@ -3356,12 +3384,14 @@ const Dashboard = ({
   customers, 
   machines,
   releases, 
+  settings,
   showToast 
 }: { 
   orders: Order[], 
   customers: Customer[], 
   machines: any[],
   releases: any[], 
+  settings: SystemSettings | null,
   showToast: (m: string, t?: 'success' | 'error') => void 
 }) => {
   const [startDate, setStartDate] = useState<string>('');
@@ -3390,6 +3420,14 @@ const Dashboard = ({
   const activeCustomersCount = startDate || endDate 
     ? new Set(filteredOrders.map(o => o.customerId)).size
     : customers.length;
+
+  const totalJpySpent = filteredOrders.reduce((sum, o) => sum + o.items.reduce((s, i) => {
+    const baseTwdPrice = i.price - (i.variant?.includes('(環保)') ? 10 : 0);
+    const currentPriceMap = settings?.priceMap || DEFAULT_PRICE_MAP;
+    const jpyPriceStr = Object.keys(currentPriceMap).find(key => currentPriceMap[parseInt(key)] === baseTwdPrice);
+    const jpyPrice = jpyPriceStr ? parseInt(jpyPriceStr) : 0;
+    return s + (jpyPrice * i.quantity);
+  }, 0), 0);
 
   const pendingReleases = releases.filter(r => r.status === 'pending');
 
@@ -3547,10 +3585,14 @@ const Dashboard = ({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-orange-400 p-6 rounded-3xl text-white card-shadow">
           <p className="text-xs font-bold opacity-60 uppercase tracking-widest mb-1">預估營收</p>
           <p className="text-3xl font-bold">NT${totalRevenue}</p>
+        </div>
+        <div className="bg-red-400 p-6 rounded-3xl text-white card-shadow">
+          <p className="text-xs font-bold opacity-60 uppercase tracking-widest mb-1">日幣總花費</p>
+          <p className="text-3xl font-bold">¥{totalJpySpent}</p>
         </div>
         <div className="bg-ink/40 p-6 rounded-3xl text-white card-shadow">
           <p className="text-xs font-bold opacity-60 uppercase tracking-widest mb-1">總顆數</p>
@@ -3913,6 +3955,18 @@ export default function App() {
   const [isPrinting, setIsPrinting] = useState(false);
   const [autoSync, setAutoSyncState] = useState<boolean>(() => localStorage.getItem('cuibo_gasha_autosync') === 'true');
   const [showSyncPrompt, setShowSyncPrompt] = useState<boolean>(false);
+  const [quotaExceededError, setQuotaExceededError] = useState<boolean>(false);
+
+  useEffect(() => {
+    const handleFirestoreErrorEvent = (e: any) => {
+      const errInfo = e.detail;
+      if (errInfo && errInfo.error && (errInfo.error.toLowerCase().includes('quota') || errInfo.error.includes('Quota exceeded'))) {
+        setQuotaExceededError(true);
+      }
+    };
+    window.addEventListener('firestore-error', handleFirestoreErrorEvent);
+    return () => window.removeEventListener('firestore-error', handleFirestoreErrorEvent);
+  }, []);
 
   const setAutoSync = (val: boolean) => {
     localStorage.setItem('cuibo_gasha_autosync', String(val));
@@ -3926,6 +3980,8 @@ export default function App() {
     }
   }, [user]);
 
+  const [networkReady, setNetworkReady] = useState(false);
+
   useEffect(() => {
     if (!user) return;
     const updateNetwork = async () => {
@@ -3937,6 +3993,8 @@ export default function App() {
         }
       } catch (e) {
         console.error('Network toggle error', e);
+      } finally {
+        setNetworkReady(true);
       }
     };
     updateNetwork();
@@ -4152,7 +4210,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user || !networkReady) return;
 
     // Test connection
     const testConnection = async () => {
@@ -4204,7 +4262,7 @@ export default function App() {
       unsubReleases();
       unsubSettings();
     };
-  }, [user]);
+  }, [user, networkReady]);
 
   // --- Handlers ---
   const handlePrint = useReactToPrint({
@@ -4388,7 +4446,7 @@ ${settings.notificationTemplate}`;
 
   return (
     <ErrorBoundary>
-      <div className="min-h-screen pb-24">
+      <div className="min-h-[100dvh] pb-24 lg:pb-0">
         <Header user={user} activeTab={activeTab} />
         
         <main className="max-w-4xl mx-auto px-6 py-8">
@@ -4453,6 +4511,7 @@ ${settings.notificationTemplate}`;
                   customers={customers} 
                   machines={machines}
                   releases={releases}
+                  settings={settings}
                   showToast={showToast}
                 />
               )}
@@ -4557,6 +4616,42 @@ ${settings.notificationTemplate}`;
                     className="w-full py-4 bg-background text-ink rounded-2xl font-bold hover:bg-ink/5"
                   >
                     僅使用本地資料 (省額度)
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          )}
+        </AnimatePresence>
+
+        {/* Quota Exceeded Modal */}
+        <AnimatePresence>
+          {quotaExceededError && (
+            <div className="fixed inset-0 z-[130] flex items-center justify-center p-6 bg-ink/40 backdrop-blur-sm">
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.9 }}
+                className="bg-card-white w-full max-w-md p-8 rounded-3xl card-shadow border-2 border-orange-500/20"
+              >
+                <div className="w-16 h-16 bg-orange-500/10 rounded-full flex items-center justify-center mx-auto mb-6">
+                  <Database className="w-8 h-8 text-orange-500" />
+                </div>
+                <h3 className="text-xl font-bold text-ink mb-4 text-center">資料庫額度已達上限</h3>
+                <p className="text-ink/60 mb-6 leading-relaxed text-sm text-center">
+                  免費雲端額度已暫時用盡。您可以立即切換為<span className="font-bold text-orange-500">「本地離線模式」</span>繼續使用。
+                  <br/><br/>
+                  <span className="text-[11px] text-ink/40">切換後，您的資料會暫存在此設備中。明天額度恢復後，您再到設定開啟同步並強制上傳即可分享或備份至雲端。</span>
+                </p>
+                
+                <div className="flex flex-col gap-3">
+                  <button 
+                    onClick={() => {
+                      localStorage.setItem('cuibo_gasha_autosync', 'false');
+                      window.location.reload();
+                    }}
+                    className="w-full py-4 bg-orange-500 text-white rounded-2xl font-bold shadow-lg shadow-orange-500/30"
+                  >
+                    切換為本地模式並重新載入
                   </button>
                 </div>
               </motion.div>
