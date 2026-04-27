@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, ReactNode } from 'react';
+import React, { useState, useEffect, useRef, ReactNode, useCallback } from 'react';
 import { 
   Plus, List, Package, Users, LayoutDashboard, Settings, 
   Search, Printer, Copy, Download, Upload, Trash2, 
@@ -2988,7 +2988,9 @@ const CustomerDetailView = ({
           updatedAt: now
         });
       } else {
-        batch.set(dbDoc('orders'), {
+        const newOrderRef = dbDoc('orders');
+        batch.set(newOrderRef, {
+          id: newOrderRef.id,
           customerId: targetId!,
           customerName: trimmedTarget,
           items: [safeTransferredItem],
@@ -3876,7 +3878,9 @@ const Dashboard = ({
             updatedAt: now
           });
         } else {
-          batch.set(dbDoc('orders'), {
+          const newOrderRef = dbDoc('orders');
+          batch.set(newOrderRef, {
+            id: newOrderRef.id,
             customerId: targetId!,
             customerName: trimmedTarget,
             items: [{ ...transferredItem, createdAt: now }],
@@ -4170,9 +4174,12 @@ const SettingsView = ({
   return (
     <div className="space-y-6 pb-20">
       <div className="bg-card-white p-6 rounded-3xl card-shadow">
-        <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest mb-4 flex items-center gap-2">
-          <MessageSquare className="w-4 h-4" /> 通知範本設定
-        </h3>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest flex items-center gap-2">
+            <MessageSquare className="w-4 h-4" /> 通知範本設定
+          </h3>
+          <button onClick={saveSettings} className="px-3 py-1 bg-primary-blue text-white rounded-lg text-sm font-bold shadow-sm">儲存</button>
+        </div>
         <textarea 
           className="w-full h-40 p-4 bg-background rounded-2xl border-none focus:ring-2 focus:ring-primary-blue text-sm font-medium leading-relaxed"
           value={template}
@@ -4596,10 +4603,12 @@ export default function App() {
     }
   }, [customers]);
 
-  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+  const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
     setToast({ show: true, message, type });
-    setTimeout(() => setToast(t => ({ ...t, show: false })), 3000);
-  };
+    toastTimeoutRef.current = setTimeout(() => setToast(t => ({ ...t, show: false })), 3000);
+  }, []);
 
   // --- Auth & Data Sync ---
   useEffect(() => {
