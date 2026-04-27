@@ -1176,22 +1176,22 @@ const OrdersList = ({
       const newItems = order.items.map(i => i.id === updatedItem.id ? updatedItem : i);
       const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
 
-      await updateDoc(dbDoc('orders', orderId), {
+      const batch = writeBatch(db);
+      batch.update(dbDoc('orders', orderId), {
         items: newItems,
         totalAmount: newTotal,
         updatedAt: new Date().toISOString()
       });
       
-      // Update customer total spent and total items
       const diff = newTotal - order.totalAmount;
-      try {
-        await updateDoc(dbDoc('customers', order.customerId), {
+      if (diff !== 0 || qtyDiff !== 0) {
+        batch.update(dbDoc('customers', order.customerId), {
           totalSpent: increment(diff),
           totalItems: increment(qtyDiff)
         });
-      } catch (err) {
-        console.warn('Customer stats update failed', err);
       }
+
+      await batch.commit();
 
       setEditingItem(null);
       showToast('更新成功');
@@ -1469,10 +1469,11 @@ const OrdersList = ({
                           const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
                           
                           try {
+                            const batch = writeBatch(db);
                             if (newItems.length === 0) {
-                              await deleteDoc(dbDoc('orders', order.id));
+                              batch.delete(dbDoc('orders', order.id));
                             } else {
-                              await updateDoc(dbDoc('orders', order.id), {
+                              batch.update(dbDoc('orders', order.id), {
                                 items: newItems,
                                 totalAmount: newTotal,
                                 updatedAt: new Date().toISOString()
@@ -1480,13 +1481,20 @@ const OrdersList = ({
                             }
                             
                             // Update customer stats
-                            await updateDoc(dbDoc('customers', order.customerId), {
+                            batch.update(dbDoc('customers', order.customerId), {
                               totalSpent: increment(-editingItem.item.subtotal),
                               totalItems: increment(-editingItem.item.quantity)
                             });
                             
+                            await batch.commit();
+
                             showToast('項目已刪除');
-                          } catch (err) {
+                          } catch (err: any) {
+                            if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
+                              showToast('刪除失敗：資料庫免費額度已滿', 'error');
+                            } else {
+                              showToast('刪除失敗', 'error');
+                            }
                             handleFirestoreError(err, OperationType.WRITE, `orders/${order.id}`);
                           }
                         }
@@ -1832,21 +1840,22 @@ const MachineEditModal = ({
       const newItems = order.items.map(i => i.id === updatedItem.id ? updatedItem : i);
       const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
 
-      await updateDoc(dbDoc('orders', orderId), {
+      const batch = writeBatch(db);
+      batch.update(dbDoc('orders', orderId), {
         items: newItems,
         totalAmount: newTotal,
         updatedAt: new Date().toISOString()
       });
       
       const diff = newTotal - order.totalAmount;
-      try {
-        await updateDoc(dbDoc('customers', order.customerId), {
+      if (diff !== 0 || qtyDiff !== 0) {
+        batch.update(dbDoc('customers', order.customerId), {
           totalSpent: increment(diff),
           totalItems: increment(qtyDiff)
         });
-      } catch (err) {
-        console.warn('Customer stats update failed', err);
       }
+
+      await batch.commit();
 
       setEditingItem(null);
       showToast('更新成功');
@@ -2294,10 +2303,11 @@ const MachineEditModal = ({
                           const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
                           
                           try {
+                            const batch = writeBatch(db);
                             if (newItems.length === 0) {
-                              await deleteDoc(dbDoc('orders', order.id));
+                              batch.delete(dbDoc('orders', order.id));
                             } else {
-                              await updateDoc(dbDoc('orders', order.id), {
+                              batch.update(dbDoc('orders', order.id), {
                                 items: newItems,
                                 totalAmount: newTotal,
                                 updatedAt: new Date().toISOString()
@@ -2305,13 +2315,20 @@ const MachineEditModal = ({
                             }
                             
                             // Update customer stats
-                            await updateDoc(dbDoc('customers', order.customerId), {
+                            batch.update(dbDoc('customers', order.customerId), {
                               totalSpent: increment(-editingItem.item.subtotal),
                               totalItems: increment(-editingItem.item.quantity)
                             });
                             
+                            await batch.commit();
+
                             showToast('項目已刪除');
-                          } catch (err) {
+                          } catch (err: any) {
+                            if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
+                              showToast('刪除失敗：資料庫免費額度已滿', 'error');
+                            } else {
+                              showToast('刪除失敗', 'error');
+                            }
                             handleFirestoreError(err, OperationType.WRITE, `orders/${order.id}`);
                           }
                         }
@@ -2839,22 +2856,22 @@ const CustomerDetailView = ({
       
       const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
 
-      await updateDoc(dbDoc('orders', orderId), {
+      const batch = writeBatch(db);
+      batch.update(dbDoc('orders', orderId), {
         items: newItems,
         totalAmount: newTotal,
         updatedAt: new Date().toISOString()
       });
       
-      // Update customer total spent and total items
       const diff = newTotal - order.totalAmount;
-      try {
-        await updateDoc(dbDoc('customers', customer.id), {
+      if (diff !== 0 || qtyDiff !== 0) {
+        batch.update(dbDoc('customers', customer.id), {
           totalSpent: increment(diff),
           totalItems: increment(qtyDiff)
         });
-      } catch (err) {
-        console.warn('Customer stats update failed', err);
       }
+
+      await batch.commit();
 
       setEditingItem(null);
       showToast('更新成功');
@@ -2882,6 +2899,8 @@ const CustomerDetailView = ({
     }
 
     try {
+      const batch = writeBatch(db);
+
       // 1. Find or create target customer
       let targetCust = customers.find(c => c.name.replace(/\s+/g, '') === trimmedTarget);
       let targetId = targetCust?.id;
@@ -2895,9 +2914,8 @@ const CustomerDetailView = ({
           createdAt: new Date().toISOString(),
           lastOrderAt: new Date().toISOString()
         };
-        await setDoc(newCustRef, newCust);
+        batch.set(newCustRef, newCust);
         targetId = newCustRef.id;
-        targetCust = { id: targetId, ...newCust } as Customer;
       }
 
       // 2. Remove or update from current order
@@ -2911,21 +2929,30 @@ const CustomerDetailView = ({
       
       if (transferQuantity < item.quantity) {
         // We push a consolidated remaining item to simplify logic
-        newItems.push({
+        const remainingItem = {
           ...item,
           id: rawIds[0],
           quantity: item.quantity - transferQuantity,
           subtotal: item.subtotal - transferSubtotal
-        });
+        };
+        // @ts-ignore
+        delete remainingItem.rawIds;
+        newItems.push(remainingItem);
       }
       
       const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
-      await updateDoc(dbDoc('orders', orderId), {
-        items: newItems,
-        totalAmount: newTotal,
-        updatedAt: new Date().toISOString()
-      });
-      await updateDoc(dbDoc('customers', customer.id), {
+
+      if (newItems.length === 0) {
+        batch.delete(dbDoc('orders', orderId));
+      } else {
+        batch.update(dbDoc('orders', orderId), {
+          items: newItems,
+          totalAmount: newTotal,
+          updatedAt: new Date().toISOString()
+        });
+      }
+      
+      batch.update(dbDoc('customers', customer.id), {
         totalSpent: increment(-transferSubtotal),
         totalItems: increment(-transferQuantity)
       });
@@ -2934,19 +2961,20 @@ const CustomerDetailView = ({
       const targetOrder = orders.find(o => o.customerId === targetId && o.status === 'pending');
       const now = new Date().toISOString();
       const transferredNewItem = { ...item, id: crypto.randomUUID(), quantity: transferQuantity, subtotal: transferSubtotal, createdAt: now };
+      // @ts-ignore
       delete transferredNewItem.rawIds;
 
       if (targetOrder) {
         const updatedItems = [...targetOrder.items, transferredNewItem];
 
-        await updateDoc(dbDoc('orders', targetOrder.id), {
+        batch.update(dbDoc('orders', targetOrder.id), {
           items: updatedItems,
           totalAmount: targetOrder.totalAmount + transferSubtotal,
           updatedAt: now
         });
       } else {
-        await setDoc(dbDoc('orders'), {
-          customerId: targetId,
+        batch.set(dbDoc('orders'), {
+          customerId: targetId!,
           customerName: trimmedTarget,
           items: [transferredNewItem],
           totalAmount: transferSubtotal,
@@ -2955,11 +2983,13 @@ const CustomerDetailView = ({
           updatedAt: now
         });
       }
-      await updateDoc(dbDoc('customers', targetId!), {
+      batch.update(dbDoc('customers', targetId!), {
         totalSpent: increment(transferSubtotal),
         totalItems: increment(transferQuantity),
         lastOrderAt: new Date().toISOString()
       });
+
+      await batch.commit();
 
       setTransferringItem(null);
       setTargetCustomerName('');
@@ -3150,8 +3180,15 @@ const CustomerDetailView = ({
       </header>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-6 pb-32">
-        {customerOrders.map(order => {
-          const groupedItems = groupOrderItems(order);
+        {customerOrders.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-20 text-center">
+            <Package className="w-12 h-12 text-ink/20 mb-4" />
+            <p className="font-bold text-ink/40">這個顧客目前沒有訂單紀錄</p>
+            <p className="text-xs text-ink/30 mt-2 max-w-[200px]">若是總顆數顯示與實際不符，請點擊上方右上角的「重新計算」按鈕進行校正。</p>
+          </div>
+        ) : (
+          customerOrders.map(order => {
+            const groupedItems = groupOrderItems(order);
           return (
             <div key={order.id} className="bg-card-white p-6 rounded-3xl card-shadow border-l-4 border-primary-blue">
               <div className="flex justify-between items-center mb-4">
@@ -3186,7 +3223,10 @@ const CustomerDetailView = ({
                 </button>
               </div>
               <div className="space-y-4">
-                {groupedItems.map((item, idx) => {
+                {groupedItems.length === 0 ? (
+                  <p className="text-center py-4 text-ink/30 font-medium text-sm">訂單內無項目</p>
+                ) : (
+                  groupedItems.map((item, idx) => {
                   // For grouped items, we just check if ANY of their raw items has a pending release.
                   // Since all raw items in the group have the same machine & variant, it's safe to visually track the first one
                   const isReleased = item.rawIds.some(rawId => releases.some(r => r.orderId === order.id && r.itemId === rawId && r.status === 'pending'));
@@ -3276,11 +3316,11 @@ const CustomerDetailView = ({
                     </div>
                   </div>
                 );
-              })}
+              }))}
             </div>
           </div>
           );
-        })}
+        }))}
       </div>
 
       {/* Edit Modal */}
@@ -3360,10 +3400,11 @@ const CustomerDetailView = ({
                           const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
                           
                           try {
+                            const batch = writeBatch(db);
                             if (newItems.length === 0) {
-                              await deleteDoc(dbDoc('orders', order.id));
+                              batch.delete(dbDoc('orders', order.id));
                             } else {
-                              await updateDoc(dbDoc('orders', order.id), {
+                              batch.update(dbDoc('orders', order.id), {
                                 items: newItems,
                                 totalAmount: newTotal,
                                 updatedAt: new Date().toISOString()
@@ -3371,13 +3412,20 @@ const CustomerDetailView = ({
                             }
                             
                             // Update customer stats
-                            await updateDoc(dbDoc('customers', order.customerId), {
+                            batch.update(dbDoc('customers', order.customerId), {
                               totalSpent: increment(-editingItem.item.subtotal),
                               totalItems: increment(-editingItem.item.quantity)
                             });
                             
+                            await batch.commit();
+
                             showToast('項目已刪除');
-                          } catch (err) {
+                          } catch (err: any) {
+                            if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
+                              showToast('刪除失敗：資料庫免費額度已滿', 'error');
+                            } else {
+                              showToast('刪除失敗', 'error');
+                            }
                             handleFirestoreError(err, OperationType.WRITE, `orders/${order.id}`);
                           }
                         }
@@ -3705,6 +3753,8 @@ const Dashboard = ({
     }
 
     try {
+      const batch = writeBatch(db);
+
       // 1. Find or create target customer
       let targetCust = customers.find(c => c.name.replace(/\s+/g, '') === trimmedTarget);
       let targetId = targetCust?.id;
@@ -3718,13 +3768,12 @@ const Dashboard = ({
           createdAt: new Date().toISOString(),
           lastOrderAt: new Date().toISOString()
         };
-        await setDoc(newCustRef, newCust);
+        batch.set(newCustRef, newCust);
         targetId = newCustRef.id;
-        targetCust = { id: targetId, ...newCust } as Customer;
       }
 
       // 2. Update release status
-      await updateDoc(dbDoc('releases', release.id), { status: 'completed' });
+      batch.update(dbDoc('releases', release.id), { status: 'completed' });
       
       // 3. Update the original order item and customer
       const orderRef = dbDoc('orders', release.orderId);
@@ -3750,9 +3799,9 @@ const Dashboard = ({
         const newTotal = updatedItems.reduce((sum, i) => sum + i.subtotal, 0);
         
         if (updatedItems.length === 0) {
-          await deleteDoc(orderRef);
+          batch.delete(orderRef);
         } else {
-          await updateDoc(orderRef, {
+          batch.update(orderRef, {
             items: updatedItems,
             totalAmount: newTotal,
             updatedAt: new Date().toISOString()
@@ -3761,7 +3810,7 @@ const Dashboard = ({
 
         // Update original customer's totalSpent and totalItems
         if (itemToTransfer) {
-          await updateDoc(dbDoc('customers', orderData.customerId), {
+          batch.update(dbDoc('customers', orderData.customerId), {
             totalSpent: increment(-itemToTransfer.subtotal),
             totalItems: increment(-itemToTransfer.quantity)
           });
@@ -3781,14 +3830,14 @@ const Dashboard = ({
         if (targetOrder) {
           const updatedItems = [...targetOrder.items, { ...transferredItem, createdAt: now }];
 
-          await updateDoc(dbDoc('orders', targetOrder.id), {
+          batch.update(dbDoc('orders', targetOrder.id), {
             items: updatedItems,
             totalAmount: targetOrder.totalAmount + transferredItem.subtotal,
             updatedAt: now
           });
         } else {
-          await setDoc(dbDoc('orders'), {
-            customerId: targetId,
+          batch.set(dbDoc('orders'), {
+            customerId: targetId!,
             customerName: trimmedTarget,
             items: [{ ...transferredItem, createdAt: now }],
             totalAmount: transferredItem.subtotal,
@@ -3797,12 +3846,14 @@ const Dashboard = ({
             updatedAt: now
           });
         }
-        await updateDoc(dbDoc('customers', targetId!), {
+        batch.update(dbDoc('customers', targetId!), {
           totalSpent: increment(transferredItem.subtotal),
           totalItems: increment(transferredItem.quantity),
           lastOrderAt: new Date().toISOString()
         });
       }
+
+      await batch.commit();
 
       showToast('釋出轉移成功！');
       setTransferringRelease(null);
@@ -4044,11 +4095,25 @@ const SettingsView = ({
           const collections = ['orders', 'machines', 'customers'];
           for (const colName of collections) {
             const snapshot = await getDocs(collection(db, colName));
-            const deletePromises = snapshot.docs.map(d => deleteDoc(d.ref));
-            await Promise.all(deletePromises);
+            let currentPromises: Promise<void>[] = [];
+            for (const doc of snapshot.docs) {
+              currentPromises.push(deleteDoc(doc.ref));
+              if (currentPromises.length >= 100) {
+                await Promise.all(currentPromises);
+                currentPromises = [];
+              }
+            }
+            if (currentPromises.length > 0) {
+              await Promise.all(currentPromises);
+            }
           }
           showToast('全部資料已清除');
-        } catch (err) {
+        } catch (err: any) {
+          if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
+            showToast('清除失敗：資料庫免費額度已滿', 'error');
+          } else {
+            showToast('清除失敗', 'error');
+          }
           handleFirestoreError(err, OperationType.DELETE, 'multiple_collections');
         }
       }
@@ -4657,44 +4722,72 @@ ${settings.notificationTemplate}`;
           type: 'danger',
           onConfirm: async () => {
             try {
-              const batch = writeBatch(db);
-              
+              const allOperations: (() => void)[] = [];
+              let currentBatch = writeBatch(db);
+              let operationCount = 0;
+
+              const checkBatchLimit = async () => {
+                if (operationCount >= 400) {
+                  await currentBatch.commit();
+                  currentBatch = writeBatch(db);
+                  operationCount = 0;
+                }
+              };
+
               if (data.customers) {
-                data.customers.forEach((c: any) => {
+                for (const c of data.customers) {
                   const { id, ...rest } = c;
-                  batch.set(dbDoc('customers', id), rest);
-                });
+                  currentBatch.set(dbDoc('customers', id), rest);
+                  operationCount++;
+                  await checkBatchLimit();
+                }
               }
               
               if (data.orders) {
-                data.orders.forEach((o: any) => {
+                for (const o of data.orders) {
                   const { id, ...rest } = o;
-                  batch.set(dbDoc('orders', id), rest);
-                });
+                  currentBatch.set(dbDoc('orders', id), rest);
+                  operationCount++;
+                  await checkBatchLimit();
+                }
               }
 
               if (data.machines) {
-                data.machines.forEach((m: any) => {
+                for (const m of data.machines) {
                   const { id, ...rest } = m;
-                  batch.set(dbDoc('machines', id), rest);
-                });
+                  currentBatch.set(dbDoc('machines', id), rest);
+                  operationCount++;
+                  await checkBatchLimit();
+                }
               }
 
               if (data.releases) {
-                data.releases.forEach((r: any) => {
+                for (const r of data.releases) {
                   const { id, ...rest } = r;
-                  batch.set(dbDoc('releases', id), rest);
-                });
+                  currentBatch.set(dbDoc('releases', id), rest);
+                  operationCount++;
+                  await checkBatchLimit();
+                }
               }
               
               if (data.settings) {
                 const { id, ...rest } = data.settings;
-                batch.set(dbDoc('settings', 'global'), rest);
+                currentBatch.set(dbDoc('settings', 'global'), rest);
+                operationCount++;
+                await checkBatchLimit();
               }
               
-              await batch.commit();
+              if (operationCount > 0) {
+                await currentBatch.commit();
+              }
+              
               showToast('資料還原成功！');
-            } catch (err) {
+            } catch (err: any) {
+              if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
+                showToast('還原失敗：資料庫免費額度已滿', 'error');
+              } else {
+                showToast('還原失敗', 'error');
+              }
               handleFirestoreError(err, OperationType.WRITE, 'batch_import');
             }
           }
@@ -4714,12 +4807,39 @@ ${settings.notificationTemplate}`;
       type: 'danger',
       onConfirm: async () => {
         try {
-          const batch = writeBatch(db);
-          customers.forEach(c => batch.delete(dbDoc('customers', c.id)));
-          orders.forEach(o => batch.delete(dbDoc('orders', o.id)));
-          await batch.commit();
+          let currentBatch = writeBatch(db);
+          let operationCount = 0;
+
+          const checkBatchLimit = async () => {
+            if (operationCount >= 400) {
+              await currentBatch.commit();
+              currentBatch = writeBatch(db);
+              operationCount = 0;
+            }
+          };
+
+          for (const c of customers) {
+            currentBatch.delete(dbDoc('customers', c.id));
+            operationCount++;
+            await checkBatchLimit();
+          }
+          
+          for (const o of orders) {
+            currentBatch.delete(dbDoc('orders', o.id));
+            operationCount++;
+            await checkBatchLimit();
+          }
+          
+          if (operationCount > 0) {
+            await currentBatch.commit();
+          }
           showToast('資料已清空。');
-        } catch (err) {
+        } catch (err: any) {
+          if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
+            showToast('清空失敗：資料庫免費額度已滿', 'error');
+          } else {
+            showToast('清空失敗', 'error');
+          }
           handleFirestoreError(err, OperationType.DELETE, 'batch_clear');
         }
       }
