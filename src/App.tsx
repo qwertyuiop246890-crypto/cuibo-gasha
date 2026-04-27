@@ -194,7 +194,7 @@ const SuggestiveInput = ({
   className?: string
 }) => {
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const filtered = suggestions.filter(s => s.toLowerCase().includes(value.toLowerCase()) && s !== value).slice(0, 5);
+  const filtered = suggestions.filter(s => s.toLowerCase().includes(value.toLowerCase()) && s !== value);
 
   return (
     <div className="relative w-full">
@@ -213,7 +213,7 @@ const SuggestiveInput = ({
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -10 }}
-            className="absolute left-0 right-0 top-full mt-2 bg-card-white rounded-2xl shadow-xl z-50 overflow-hidden border border-divider"
+            className="absolute left-0 right-0 top-full mt-2 bg-card-white rounded-2xl shadow-xl z-50 overflow-y-auto max-h-60 border border-divider"
           >
             {filtered.map(s => (
               <button
@@ -914,7 +914,10 @@ const CreateOrder = ({
   
   const selectedMachine = machines.find(m => m.name === machineName);
   const variantSuggestions = selectedMachine 
-    ? selectedMachine.variants 
+    ? Array.from(new Set([
+        ...(selectedMachine.variants || []),
+        ...orders.flatMap(o => o.items).filter(i => i.machineName === machineName).map(i => i.variant).filter(Boolean)
+      ]))
     : Array.from(new Set(
         orders
           .flatMap(o => o.items)
@@ -1181,14 +1184,24 @@ const OrdersList = ({
       
       // Update customer total spent and total items
       const diff = newTotal - order.totalAmount;
-      await updateDoc(dbDoc('customers', order.customerId), {
-        totalSpent: increment(diff),
-        totalItems: increment(qtyDiff)
-      });
+      try {
+        await updateDoc(dbDoc('customers', order.customerId), {
+          totalSpent: increment(diff),
+          totalItems: increment(qtyDiff)
+        });
+      } catch (err) {
+        console.warn('Customer stats update failed', err);
+      }
 
       setEditingItem(null);
       showToast('更新成功');
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
+        showToast('更新失敗：資料庫免費額度已滿', 'error');
+      } else {
+        showToast('更新失敗', 'error');
+      }
+      setEditingItem(null);
       handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
     }
   };
@@ -1418,16 +1431,24 @@ const OrdersList = ({
                     <label className="text-xs font-bold text-ink/40 block mb-1">單價</label>
                     <input 
                       type="number" className="w-full p-4 bg-background rounded-2xl border-none"
-                      value={editingItem.item.price}
-                      onChange={(e) => setEditingItem({ ...editingItem, item: { ...editingItem.item, price: parseInt(e.target.value), subtotal: parseInt(e.target.value) * editingItem.item.quantity } })}
+                      value={isNaN(editingItem.item.price) ? '' : editingItem.item.price}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value);
+                        const newPrice = isNaN(val) ? 0 : val;
+                        setEditingItem({ ...editingItem, item: { ...editingItem.item, price: newPrice, subtotal: newPrice * editingItem.item.quantity } })
+                      }}
                     />
                   </div>
                   <div>
                     <label className="text-xs font-bold text-ink/40 block mb-1">數量</label>
                     <input 
                       type="number" className="w-full p-4 bg-background rounded-2xl border-none"
-                      value={editingItem.item.quantity}
-                      onChange={(e) => setEditingItem({ ...editingItem, item: { ...editingItem.item, quantity: parseInt(e.target.value), subtotal: editingItem.item.price * parseInt(e.target.value) } })}
+                      value={isNaN(editingItem.item.quantity) ? '' : editingItem.item.quantity}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value);
+                        const newQty = isNaN(val) ? 0 : val;
+                        setEditingItem({ ...editingItem, item: { ...editingItem.item, quantity: newQty, subtotal: editingItem.item.price * newQty } })
+                      }}
                     />
                   </div>
                 </div>
@@ -1441,6 +1462,7 @@ const OrdersList = ({
                         message: `確定要從這個顧客的清單中刪除 ${editingItem.item.machineName} 嗎？`,
                         type: 'danger',
                         onConfirm: async () => {
+                          setEditingItem(null);
                           const order = orders.find(o => o.id === editingItem.orderId);
                           if (!order) return;
                           const newItems = order.items.filter(i => i.id !== editingItem.item.id);
@@ -1463,7 +1485,6 @@ const OrdersList = ({
                               totalItems: increment(-editingItem.item.quantity)
                             });
                             
-                            setEditingItem(null);
                             showToast('項目已刪除');
                           } catch (err) {
                             handleFirestoreError(err, OperationType.WRITE, `orders/${order.id}`);
@@ -1772,16 +1793,20 @@ const MachineEditModal = ({
   onSave,
   onDelete,
   orders,
+  customers,
   settings,
-  showToast
+  showToast,
+  setConfirmModal
 }: {
   machine: any;
   onClose: () => void;
   onSave: (data: any, oldName: string, variantMapping: Record<string, string>, syncWithOrders: boolean) => Promise<void>;
   onDelete: (machineId: string, machineName: string) => void;
   orders: Order[];
+  customers: Customer[];
   settings: SystemSettings | null;
   showToast: (m: string, t?: 'success' | 'error') => void;
+  setConfirmModal: (m: any) => void;
 }) => {
   const [name, setName] = useState(machine.name);
   const [price, setPrice] = useState(machine.defaultPrice.toString());
@@ -1792,6 +1817,57 @@ const MachineEditModal = ({
   const [variantMapping, setVariantMapping] = useState<Record<string, string>>({});
   const [uploadedImage, setUploadedImage] = useState<string | null>(machine.imageUrl || null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [editingItem, setEditingItem] = useState<{ orderId: string, item: OrderItem } | null>(null);
+
+  const handleUpdateItem = async (orderId: string, updatedItem: OrderItem) => {
+    try {
+      const order = orders.find(o => o.id === orderId);
+      if (!order) return;
+
+      const oldItem = order.items.find(i => i.id === updatedItem.id);
+      const qtyDiff = updatedItem.quantity - (oldItem?.quantity || 0);
+
+      updatedItem.updatedAt = new Date().toISOString();
+      const newItems = order.items.map(i => i.id === updatedItem.id ? updatedItem : i);
+      const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
+
+      await updateDoc(dbDoc('orders', orderId), {
+        items: newItems,
+        totalAmount: newTotal,
+        updatedAt: new Date().toISOString()
+      });
+      
+      const diff = newTotal - order.totalAmount;
+      try {
+        await updateDoc(dbDoc('customers', order.customerId), {
+          totalSpent: increment(diff),
+          totalItems: increment(qtyDiff)
+        });
+      } catch (err) {
+        console.warn('Customer stats update failed', err);
+      }
+
+      setEditingItem(null);
+      showToast('更新成功');
+    } catch (err: any) {
+      if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
+        showToast('更新失敗：資料庫免費額度已滿', 'error');
+      } else {
+        showToast('更新失敗', 'error');
+      }
+      setEditingItem(null);
+      handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
+    }
+  };
+
+  const machineOrders = orders
+    .filter(o => o.items.some(i => i.machineName === machine.name))
+    .map(o => ({
+      ...o,
+      items: o.items.filter(i => i.machineName === machine.name)
+    }))
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1944,7 +2020,7 @@ const MachineEditModal = ({
 
   return (
     <div className="fixed inset-0 z-[110] bg-black/50 flex items-center justify-center p-4">
-      <div className="bg-background w-full max-w-2xl rounded-3xl shadow-2xl flex flex-col max-h-[90vh]">
+      <div className="bg-background w-full max-w-4xl rounded-3xl shadow-2xl flex flex-col max-h-[90vh]">
         <div className="p-6 border-b border-divider flex justify-between items-center bg-card-white rounded-t-3xl">
           <h3 className="text-xl font-bold text-ink">編輯機台: {machine.name}</h3>
           <button onClick={onClose} className="p-2 hover:bg-background rounded-full transition-colors">
@@ -2070,6 +2146,51 @@ const MachineEditModal = ({
               </button>
             </div>
           </div>
+
+          <div className="pt-6 border-t border-divider">
+            <h4 className="text-sm font-bold text-ink/40 uppercase tracking-widest mb-4">這台機台的扭蛋紀錄</h4>
+            {machineOrders.length === 0 ? (
+              <p className="text-center py-8 text-ink/30 font-medium">尚無顧客扭這台機台</p>
+            ) : (
+              <div className="space-y-3">
+                {machineOrders.map(order => 
+                  order.items.map(item => (
+                    <div key={item.id} className="flex flex-col sm:flex-row sm:items-center justify-between p-4 bg-background rounded-2xl hover:bg-ink/5 transition-colors">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 bg-primary-blue/10 rounded-xl flex items-center justify-center text-primary-blue font-bold">
+                          {item.quantity}
+                        </div>
+                        <div>
+                          <div className="font-bold text-ink text-sm">
+                            {order.customerName}
+                          </div>
+                          {item.variant ? (
+                            <span className="text-xs text-ink/60 bg-white px-2 py-0.5 rounded-md mt-1 inline-block border border-divider">
+                              {item.variant}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-ink/40 italic mt-1 inline-block">未指定款式</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-end gap-4 mt-3 sm:mt-0">
+                        <div className="text-right">
+                          <div className="text-xs text-ink/40">NT$ {item.subtotal}</div>
+                          <div className="text-[10px] text-ink/30">{format(toZonedTime(new Date(order.createdAt), TAIWAN_TZ), 'yyyy/MM/dd HH:mm')}</div>
+                        </div>
+                        <button 
+                          onClick={() => setEditingItem({ orderId: order.id, item })}
+                          className="p-2 text-primary-blue hover:text-white hover:bg-primary-blue rounded-xl transition-all border border-primary-blue/20 bg-white"
+                        >
+                          <Save className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
         </div>
 
         <div className="p-6 border-t border-divider bg-card-white rounded-b-3xl flex justify-between">
@@ -2110,6 +2231,103 @@ const MachineEditModal = ({
           </label>
         </div>
       </div>
+
+      {/* Editing Item Modal */ }
+      <AnimatePresence>
+        {editingItem && (
+          <div className="fixed inset-0 z-[120] bg-black/40 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-card-white w-full max-w-sm p-6 rounded-3xl shadow-2xl"
+            >
+              <h3 className="text-lg font-bold text-ink mb-4">編輯訂單項目</h3>
+              <div className="space-y-4">
+                <div>
+                  <label className="text-xs font-bold text-ink/40 block mb-1">款式</label>
+                  <SuggestiveInput 
+                    value={editingItem.item.variant || ''}
+                    onChange={(v) => setEditingItem({ ...editingItem, item: { ...editingItem.item, variant: v } })}
+                    placeholder="輸入款式"
+                    suggestions={variantList}
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-xs font-bold text-ink/40 block mb-1">數量</label>
+                    <input 
+                      type="number" className="w-full p-4 bg-background rounded-2xl border-none"
+                      value={isNaN(editingItem.item.quantity) ? '' : editingItem.item.quantity}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value);
+                        const newQty = isNaN(val) ? 1 : Math.max(1, val);
+                        setEditingItem({ ...editingItem, item: { ...editingItem.item, quantity: newQty, subtotal: editingItem.item.price * newQty } })
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-ink/40 block mb-1">單價 (NT$)</label>
+                    <input 
+                      type="number" className="w-full p-4 bg-background rounded-2xl border-none"
+                      value={isNaN(editingItem.item.price) ? '' : editingItem.item.price}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value);
+                        const newPrice = isNaN(val) ? 0 : val;
+                        setEditingItem({ ...editingItem, item: { ...editingItem.item, price: newPrice, subtotal: newPrice * editingItem.item.quantity } })
+                      }}
+                    />
+                  </div>
+                </div>
+                <div className="pt-2 flex gap-2">
+                  <button onClick={() => setEditingItem(null)} className="flex-1 py-4 bg-background text-ink rounded-2xl font-bold">取消</button>
+                  <button 
+                    onClick={() => {
+                      setConfirmModal({
+                        show: true,
+                        title: '刪除項目',
+                        message: `確定要刪除這筆訂單項目嗎？`,
+                        type: 'danger',
+                        onConfirm: async () => {
+                          setEditingItem(null);
+                          const order = orders.find(o => o.id === editingItem.orderId);
+                          if (!order) return;
+                          const newItems = order.items.filter(i => i.id !== editingItem.item.id);
+                          const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
+                          
+                          try {
+                            if (newItems.length === 0) {
+                              await deleteDoc(dbDoc('orders', order.id));
+                            } else {
+                              await updateDoc(dbDoc('orders', order.id), {
+                                items: newItems,
+                                totalAmount: newTotal,
+                                updatedAt: new Date().toISOString()
+                              });
+                            }
+                            
+                            // Update customer stats
+                            await updateDoc(dbDoc('customers', order.customerId), {
+                              totalSpent: increment(-editingItem.item.subtotal),
+                              totalItems: increment(-editingItem.item.quantity)
+                            });
+                            
+                            showToast('項目已刪除');
+                          } catch (err) {
+                            handleFirestoreError(err, OperationType.WRITE, `orders/${order.id}`);
+                          }
+                        }
+                      });
+                    }}
+                    className="p-4 bg-red-50 text-red-500 rounded-2xl"
+                  >
+                    <Trash2 className="w-5 h-5" />
+                  </button>
+                  <button onClick={() => handleUpdateItem(editingItem.orderId, editingItem.item)} className="flex-[2] py-4 bg-primary-blue text-white rounded-2xl font-bold">儲存</button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
@@ -2138,6 +2356,7 @@ const MachineManagement = ({
   const [editingVariantIndex, setEditingVariantIndex] = useState<number | null>(null);
   const [editingVariantValue, setEditingVariantValue] = useState('');
   const [viewMode, setViewMode] = useState<'list' | 'grid-sm' | 'grid-lg'>('list');
+  const [machineSearchTerm, setMachineSearchTerm] = useState('');
 
   // Derive all unique machine names from orders
   const machineNamesFromOrders = Array.from(new Set(orders.flatMap(o => o.items.map(i => i.machineName))));
@@ -2146,7 +2365,7 @@ const MachineManagement = ({
   const allMachineNames = Array.from(new Set([
     ...machineNamesFromOrders,
     ...machines.map(m => m.name)
-  ])).sort();
+  ])).sort().filter(name => name.toLowerCase().includes(machineSearchTerm.toLowerCase()));
 
   const autoInitializeUnsetMachines = async () => {
     const unsetMachines = allMachineNames.filter(name => !machines.find(m => m.name === name));
@@ -2374,6 +2593,16 @@ const MachineManagement = ({
       <div className="flex justify-between items-center">
         <h3 className="text-lg font-bold text-ink">機台列表</h3>
         <div className="flex items-center gap-2">
+          <div className="relative">
+            <input 
+              type="text" 
+              placeholder="搜尋機台..." 
+              className="pl-10 pr-4 py-2 bg-background rounded-xl border-none text-sm w-48 sm:w-64"
+              value={machineSearchTerm}
+              onChange={(e) => setMachineSearchTerm(e.target.value)}
+            />
+            <Search className="w-4 h-4 text-ink/40 absolute left-3 top-1/2 -translate-y-1/2" />
+          </div>
           <div className="flex bg-background rounded-xl p-1">
             <button onClick={() => setViewMode('list')} className={cn("p-2 rounded-lg transition-colors", viewMode === 'list' ? "bg-white shadow-sm" : "text-ink/40 hover:text-ink")}>
               <List className="w-4 h-4" />
@@ -2618,14 +2847,24 @@ const CustomerDetailView = ({
       
       // Update customer total spent and total items
       const diff = newTotal - order.totalAmount;
-      await updateDoc(dbDoc('customers', customer.id), {
-        totalSpent: increment(diff),
-        totalItems: increment(qtyDiff)
-      });
+      try {
+        await updateDoc(dbDoc('customers', customer.id), {
+          totalSpent: increment(diff),
+          totalItems: increment(qtyDiff)
+        });
+      } catch (err) {
+        console.warn('Customer stats update failed', err);
+      }
 
       setEditingItem(null);
       showToast('更新成功');
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
+        showToast('更新失敗：資料庫免費額度已滿', 'error');
+      } else {
+        showToast('更新失敗', 'error');
+      }
+      setEditingItem(null);
       handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
     }
   };
@@ -2725,7 +2964,14 @@ const CustomerDetailView = ({
       setTransferringItem(null);
       setTargetCustomerName('');
       showToast(`已轉讓給 ${trimmedTarget}`);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
+        showToast('轉讓失敗：資料庫免費額度已滿', 'error');
+      } else {
+        showToast('轉讓失敗', 'error');
+      }
+      setTransferringItem(null);
+      setTargetCustomerName('');
       handleFirestoreError(err, OperationType.WRITE, 'transfer');
     }
   };
@@ -2767,7 +3013,13 @@ const CustomerDetailView = ({
       await setDoc(releaseRef, releaseData);
       showToast('正在釋出中');
       setReleasingItem(null);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
+        showToast('釋出失敗：資料庫免費額度已滿', 'error');
+      } else {
+        showToast('釋出失敗', 'error');
+      }
+      setReleasingItem(null);
       handleFirestoreError(err, OperationType.WRITE, 'releases');
     }
   };
@@ -3067,16 +3319,24 @@ const CustomerDetailView = ({
                     <label className="text-xs font-bold text-ink/40 block mb-1">單價</label>
                     <input 
                       type="number" className="w-full p-4 bg-background rounded-2xl border-none"
-                      value={editingItem.item.price}
-                      onChange={(e) => setEditingItem({ ...editingItem, item: { ...editingItem.item, price: parseInt(e.target.value), subtotal: parseInt(e.target.value) * editingItem.item.quantity } })}
+                      value={isNaN(editingItem.item.price) ? '' : editingItem.item.price}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value);
+                        const newPrice = isNaN(val) ? 0 : val;
+                        setEditingItem({ ...editingItem, item: { ...editingItem.item, price: newPrice, subtotal: newPrice * editingItem.item.quantity } })
+                      }}
                     />
                   </div>
                   <div>
                     <label className="text-xs font-bold text-ink/40 block mb-1">數量</label>
                     <input 
                       type="number" className="w-full p-4 bg-background rounded-2xl border-none"
-                      value={editingItem.item.quantity}
-                      onChange={(e) => setEditingItem({ ...editingItem, item: { ...editingItem.item, quantity: parseInt(e.target.value), subtotal: editingItem.item.price * parseInt(e.target.value) } })}
+                      value={isNaN(editingItem.item.quantity) ? '' : editingItem.item.quantity}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value);
+                        const newQty = isNaN(val) ? 0 : val;
+                        setEditingItem({ ...editingItem, item: { ...editingItem.item, quantity: newQty, subtotal: editingItem.item.price * newQty } })
+                      }}
                     />
                   </div>
                 </div>
@@ -3090,6 +3350,7 @@ const CustomerDetailView = ({
                         message: `確定要從訂單中刪除 ${editingItem.item.machineName} 嗎？`,
                         type: 'danger',
                         onConfirm: async () => {
+                          setEditingItem(null);
                           const order = orders.find(o => o.id === editingItem.orderId);
                           if (!order) return;
                           
@@ -3115,7 +3376,6 @@ const CustomerDetailView = ({
                               totalItems: increment(-editingItem.item.quantity)
                             });
                             
-                            setEditingItem(null);
                             showToast('項目已刪除');
                           } catch (err) {
                             handleFirestoreError(err, OperationType.WRITE, `orders/${order.id}`);
@@ -3547,7 +3807,14 @@ const Dashboard = ({
       showToast('釋出轉移成功！');
       setTransferringRelease(null);
       setTargetCustomerName('');
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
+        showToast('轉移失敗：資料庫免費額度已滿', 'error');
+      } else {
+        showToast('轉移失敗', 'error');
+      }
+      setTransferringRelease(null);
+      setTargetCustomerName('');
       handleFirestoreError(err, OperationType.WRITE, `releases/${release.id}`);
     }
   };
@@ -4007,8 +4274,12 @@ export default function App() {
       await waitForPendingWrites(db);
       if (!autoSync) await disableNetwork(db);
       showToast('強制上傳完成！');
-    } catch (e) {
-      showToast('上傳失敗！', 'error');
+    } catch (e: any) {
+      if (e?.message?.toLowerCase().includes('quota') || String(e).toLowerCase().includes('quota')) {
+        showToast('上傳失敗：資料庫免費額度已滿', 'error');
+      } else {
+        showToast(`上傳失敗：${e?.message || '未知錯誤'}`, 'error');
+      }
     }
   };
 
@@ -4021,8 +4292,13 @@ export default function App() {
         if (!autoSync) await disableNetwork(db);
         showToast('強制下載完成！');
       }, 2000);
-    } catch (e) {
-      showToast('下載失敗！', 'error');
+    } catch (e: any) {
+      if (e?.message?.toLowerCase().includes('quota') || String(e).toLowerCase().includes('quota')) {
+        showToast('下載失敗：資料庫免費額度已滿', 'error');
+        handleFirestoreError(e, OperationType.GET, 'settings/global');
+      } else {
+        showToast(`下載失敗：${e?.message || '未知錯誤'}`, 'error');
+      }
     }
   };
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
@@ -4125,7 +4401,13 @@ export default function App() {
       await batch.commit();
       showToast(syncWithOrders ? '機台設定與訂單已同步更新' : '機台設定已儲存');
       setEditingMachine(null);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
+        showToast('儲存失敗：資料庫免費額度已滿', 'error');
+      } else {
+        showToast('儲存失敗', 'error');
+      }
+      setEditingMachine(null);
       handleFirestoreError(err, OperationType.WRITE, 'machines_sync');
     }
   };
@@ -4181,7 +4463,13 @@ export default function App() {
           await batch.commit();
           showToast('機台已刪除');
           setEditingMachine(null);
-        } catch (err) {
+        } catch (err: any) {
+          if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
+            showToast('刪除失敗：資料庫免費額度已滿', 'error');
+          } else {
+            showToast('刪除失敗', 'error');
+          }
+          setEditingMachine(null);
           handleFirestoreError(err, OperationType.DELETE, `machines/${machineId}`);
         }
       }
@@ -4571,8 +4859,10 @@ ${settings.notificationTemplate}`;
               onSave={handleSaveEditedMachine}
               onDelete={handleDeleteMachine}
               orders={orders}
+              customers={customers}
               settings={settings}
               showToast={showToast}
+              setConfirmModal={setConfirmModal}
             />
           )}
         </AnimatePresence>
