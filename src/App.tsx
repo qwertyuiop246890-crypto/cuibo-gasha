@@ -2887,11 +2887,16 @@ const CustomerDetailView = ({
   };
 
   const handleTransfer = async () => {
-    if (!transferringItem || !targetCustomerName.replace(/\s+/g, '') || transferQuantity < 1) return;
+    if (!transferringItem || transferQuantity < 1) return;
+    const trimmedTarget = targetCustomerName.replace(/\s+/g, '');
+    if (!trimmedTarget) {
+      showToast('請輸入目標顧客名稱', 'error');
+      return;
+    }
+
     const { orderId, item } = transferringItem;
     // @ts-ignore
     const rawIds = item.rawIds || [item.id];
-    const trimmedTarget = targetCustomerName.replace(/\s+/g, '');
 
     if (trimmedTarget === customer.name.replace(/\s+/g, '')) {
       showToast('不能轉讓給原顧客自己！', 'error');
@@ -2920,20 +2925,25 @@ const CustomerDetailView = ({
 
       // 2. Remove or update from current order
       const currentOrder = orders.find(o => o.id === orderId);
-      if (!currentOrder) return;
+      if (!currentOrder) {
+        showToast('找不到原始訂單！', 'error');
+        return;
+      }
 
       const transferSubtotal = item.price * transferQuantity;
       
-      // Filter out raw items to rebuild
+      const oldItems = currentOrder.items.filter(i => rawIds.includes(i.id));
+      const oldQty = oldItems.reduce((sum, i) => sum + i.quantity, 0);
+      const oldSubtotal = oldItems.reduce((sum, i) => sum + i.subtotal, 0);
+
       let newItems = currentOrder.items.filter(i => !rawIds.includes(i.id));
       
-      if (transferQuantity < item.quantity) {
-        // We push a consolidated remaining item to simplify logic
+      if (transferQuantity < oldQty) {
         const remainingItem = {
-          ...item,
+          ...oldItems[0],
           id: rawIds[0],
-          quantity: item.quantity - transferQuantity,
-          subtotal: item.subtotal - transferSubtotal
+          quantity: oldQty - transferQuantity,
+          subtotal: oldSubtotal - transferSubtotal
         };
         // @ts-ignore
         delete remainingItem.rawIds;
@@ -2952,23 +2962,28 @@ const CustomerDetailView = ({
         });
       }
       
-      batch.update(dbDoc('customers', customer.id), {
+      batch.set(dbDoc('customers', customer.id), {
         totalSpent: increment(-transferSubtotal),
         totalItems: increment(-transferQuantity)
-      });
+      }, { merge: true });
 
       // 3. Add to target customer's pending order or create new
       const targetOrder = orders.find(o => o.customerId === targetId && o.status === 'pending');
       const now = new Date().toISOString();
-      const transferredNewItem = { ...item, id: crypto.randomUUID(), quantity: transferQuantity, subtotal: transferSubtotal, createdAt: now };
-      // @ts-ignore
-      delete transferredNewItem.rawIds;
+      const safeTransferredItem = {
+        id: crypto.randomUUID(),
+        machineName: item.machineName,
+        price: item.price,
+        quantity: transferQuantity,
+        subtotal: transferSubtotal,
+        createdAt: now,
+        ...(item.variant ? { variant: item.variant } : {}),
+        ...(item.machineId ? { machineId: item.machineId } : {})
+      };
 
       if (targetOrder) {
-        const updatedItems = [...targetOrder.items, transferredNewItem];
-
         batch.update(dbDoc('orders', targetOrder.id), {
-          items: updatedItems,
+          items: [...targetOrder.items, safeTransferredItem],
           totalAmount: targetOrder.totalAmount + transferSubtotal,
           updatedAt: now
         });
@@ -2976,29 +2991,31 @@ const CustomerDetailView = ({
         batch.set(dbDoc('orders'), {
           customerId: targetId!,
           customerName: trimmedTarget,
-          items: [transferredNewItem],
+          items: [safeTransferredItem],
           totalAmount: transferSubtotal,
           status: 'pending',
           createdAt: now,
           updatedAt: now
         });
       }
-      batch.update(dbDoc('customers', targetId!), {
+      batch.set(dbDoc('customers', targetId!), {
         totalSpent: increment(transferSubtotal),
         totalItems: increment(transferQuantity),
         lastOrderAt: new Date().toISOString()
-      });
+      }, { merge: true });
 
       await batch.commit();
 
       setTransferringItem(null);
       setTargetCustomerName('');
-      showToast(`已轉讓給 ${trimmedTarget}`);
+      setTransferQuantity(1);
+      showToast(`已成功轉讓給 ${trimmedTarget}`);
     } catch (err: any) {
+      console.error("Transfer Error:", err);
       if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
         showToast('轉讓失敗：資料庫免費額度已滿', 'error');
       } else {
-        showToast('轉讓失敗', 'error');
+        showToast('轉讓失敗，請檢查網路連線或稍後重試', 'error');
       }
       setTransferringItem(null);
       setTargetCustomerName('');
@@ -3030,6 +3047,7 @@ const CustomerDetailView = ({
       const releaseData: any = {
         orderId,
         itemId: item.id,
+        rawIds: (item as any).rawIds || [item.id],
         customerName: customer.name,
         machineName: item.machineName,
         quantity: releaseQuantity,
@@ -3743,9 +3761,13 @@ const Dashboard = ({
   const [targetCustomerName, setTargetCustomerName] = useState('');
 
   const handleReleaseTransfer = async () => {
-    if (!transferringRelease || !targetCustomerName.replace(/\s+/g, '')) return;
-    const release = transferringRelease;
+    if (!transferringRelease) return;
     const trimmedTarget = targetCustomerName.replace(/\s+/g, '');
+    if (!trimmedTarget) {
+      showToast('請輸入目標顧客名稱', 'error');
+      return;
+    }
+    const release = transferringRelease;
 
     if (trimmedTarget === release.customerName.replace(/\s+/g, '')) {
       showToast('不能轉讓給原顧客自己！', 'error');
@@ -3782,38 +3804,56 @@ const Dashboard = ({
       
       if (orderSnap.exists()) {
         const orderData = orderSnap.data() as Order;
-        const updatedItems = orderData.items.map(item => {
-          if (item.id === release.itemId) {
-            itemToTransfer = { ...item, quantity: release.quantity, subtotal: release.quantity * item.price };
-            const newQty = Math.max(0, item.quantity - release.quantity);
-            return {
-              ...item,
-              quantity: newQty,
-              subtotal: newQty * item.price,
-              isReleased: newQty === 0
-            };
-          }
-          return item;
-        }).filter(item => item.quantity > 0);
+        const rawIds = release.rawIds || [release.itemId];
         
-        const newTotal = updatedItems.reduce((sum, i) => sum + i.subtotal, 0);
-        
-        if (updatedItems.length === 0) {
-          batch.delete(orderRef);
-        } else {
-          batch.update(orderRef, {
-            items: updatedItems,
-            totalAmount: newTotal,
-            updatedAt: new Date().toISOString()
-          });
-        }
+        const oldItems = orderData.items.filter(i => rawIds.includes(i.id));
+        const oldQty = oldItems.reduce((sum, i) => sum + i.quantity, 0);
+        const oldSubtotal = oldItems.reduce((sum, i) => sum + i.subtotal, 0);
 
-        // Update original customer's totalSpent and totalItems
-        if (itemToTransfer) {
-          batch.update(dbDoc('customers', orderData.customerId), {
+        const transferQuantity = release.quantity;
+        const transferSubtotal = transferQuantity * release.price;
+        
+        if (oldItems.length > 0) {
+          itemToTransfer = {
+            id: rawIds[0],
+            machineName: release.machineName,
+            variant: release.variant,
+            price: release.price,
+            quantity: transferQuantity,
+            subtotal: transferSubtotal
+          };
+
+          let newItems = orderData.items.filter(i => !rawIds.includes(i.id));
+
+          if (transferQuantity < oldQty) {
+            const remainingItem = {
+              ...oldItems[0],
+              id: rawIds[0],
+              quantity: oldQty - transferQuantity,
+              subtotal: oldSubtotal - transferSubtotal
+            };
+            // @ts-ignore
+            delete remainingItem.rawIds;
+            newItems.push(remainingItem);
+          }
+          
+          const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
+          
+          if (newItems.length === 0) {
+            batch.delete(orderRef);
+          } else {
+            batch.update(orderRef, {
+              items: newItems,
+              totalAmount: newTotal,
+              updatedAt: new Date().toISOString()
+            });
+          }
+
+          // Update original customer's totalSpent and totalItems
+          batch.set(dbDoc('customers', orderData.customerId), {
             totalSpent: increment(-itemToTransfer.subtotal),
             totalItems: increment(-itemToTransfer.quantity)
-          });
+          }, { merge: true });
         }
       }
 
@@ -3846,11 +3886,11 @@ const Dashboard = ({
             updatedAt: now
           });
         }
-        batch.update(dbDoc('customers', targetId!), {
+        batch.set(dbDoc('customers', targetId!), {
           totalSpent: increment(transferredItem.subtotal),
           totalItems: increment(transferredItem.quantity),
           lastOrderAt: new Date().toISOString()
-        });
+        }, { merge: true });
       }
 
       await batch.commit();
@@ -4051,6 +4091,13 @@ const SettingsView = ({
   const [newJpy, setNewJpy] = useState('');
   const [newTwd, setNewTwd] = useState('');
 
+  useEffect(() => {
+    if (settings) {
+      setTemplate(settings.notificationTemplate || '');
+      setPriceMap(settings.priceMap || DEFAULT_PRICE_MAP);
+    }
+  }, [settings]);
+
   const saveSettings = async () => {
     try {
       const cleanedPriceMap: Record<number, number> = {};
@@ -4059,10 +4106,10 @@ const SettingsView = ({
         if (!isNaN(numV)) cleanedPriceMap[parseInt(k)] = numV;
       });
 
-      await updateDoc(dbDoc('settings', 'global'), {
+      await setDoc(dbDoc('settings', 'global'), {
         notificationTemplate: template,
         priceMap: cleanedPriceMap
-      });
+      }, { merge: true });
       showToast('設定已儲存');
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'settings/global');
@@ -4130,6 +4177,7 @@ const SettingsView = ({
           className="w-full h-40 p-4 bg-background rounded-2xl border-none focus:ring-2 focus:ring-primary-blue text-sm font-medium leading-relaxed"
           value={template}
           onChange={(e) => setTemplate(e.target.value)}
+          onBlur={saveSettings}
           placeholder="輸入通知範本..."
         />
         <div className="mt-4 p-4 bg-background rounded-xl">
