@@ -507,20 +507,17 @@ const CreateOrder = ({
         }
 
         if (bestMatch && lowestDist <= 6) {
-          const useSame = window.confirm(`發現資料庫有相似度極高(>90%)的圖片對應機台「${bestMatch.name}」，是否直接套用該機台的資訊？`);
-          if (useSame) {
-            setMachineName(bestMatch.name);
-            setPrice(bestMatch.defaultPrice);
-            if (bestMatch.variants && bestMatch.variants.length > 0) {
-              setOrderItems(bestMatch.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
-            } else {
-              setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
-            }
-            setUploadedImage(compressedDataUrl);
-            showToast('已載入相似圖片的機台資料！', 'success');
-            setIsAnalyzing(false);
-            return;
+          setMachineName(bestMatch.name);
+          setPrice(bestMatch.defaultPrice);
+          if (bestMatch.variants && bestMatch.variants.length > 0) {
+            setOrderItems(bestMatch.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
+          } else {
+            setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
           }
+          setUploadedImage(compressedDataUrl);
+          showToast('發現相似度極高的圖片，已載入機台資料！', 'success');
+          setIsAnalyzing(false);
+          return;
         }
       }
 
@@ -622,30 +619,14 @@ const CreateOrder = ({
         const existingMachineByName = machines.find(m => m.name === aiMachineName);
         
         if (existingMachineByName) {
-          const useSameSpecs = window.confirm(`AI 辨識此圖片屬於資料庫已有的機台「${aiMachineName}」，是否直接套用資料庫內的規格與預設價錢？\n（若取消則套用 AI 辨識的新規格）`);
-          
-          if (useSameSpecs) {
-            setMachineName(existingMachineByName.name);
-            setPrice(existingMachineByName.defaultPrice);
-            if (existingMachineByName.variants && existingMachineByName.variants.length > 0) {
-              setOrderItems(existingMachineByName.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
-            } else {
-              setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
-            }
-            showToast('已載入同名機台的現有資料！', 'success');
+          setMachineName(existingMachineByName.name);
+          setPrice(existingMachineByName.defaultPrice);
+          if (existingMachineByName.variants && existingMachineByName.variants.length > 0) {
+            setOrderItems(existingMachineByName.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
           } else {
-            setMachineName(existingMachineByName.name);
-            setPrice(existingMachineByName.defaultPrice);
-            // 如果 AI 有辨識出款式，優先使用 AI 辨識的款式作為當前訂單項目
-            if (result.variants && result.variants.length > 0) {
-              setOrderItems(result.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
-            } else if (result.variant) {
-              setOrderItems([{ id: crypto.randomUUID(), variant: result.variant, quantity: 1, isEco: false }]);
-            } else {
-              setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
-            }
-            showToast('已載入 AI 辨識的項目！', 'success');
+            setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
           }
+          showToast('AI 辨識為已有機台，已載入現有款式資料！', 'success');
         } else {
           if (aiMachineName) setMachineName(aiMachineName);
           if (result.variants && result.variants.length > 0) {
@@ -1191,15 +1172,14 @@ const OrdersList = ({
         });
       }
 
-      await batch.commit();
-
       setEditingItem(null);
-      showToast('更新成功');
+      showToast('儲存成功');
+      await batch.commit();
     } catch (err: any) {
       if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-        showToast('更新失敗：資料庫免費額度已滿', 'error');
+        showToast('儲存失敗：資料庫免費額度已滿', 'error');
       } else {
-        showToast('更新失敗', 'error');
+        showToast('儲存失敗', 'error');
       }
       setEditingItem(null);
       handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
@@ -1583,8 +1563,8 @@ const CustomersList = ({
           lastOrderAt
         });
       });
-      await batch.commit();
       showToast('所有顧客數據已同步');
+      await batch.commit();
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'customers_sync');
     }
@@ -1725,8 +1705,8 @@ const CustomersList = ({
                               });
                             }
                             
-                            await batch.commit();
                             showToast('顧客已刪除');
+                            await batch.commit();
                           } catch (err) {
                             handleFirestoreError(err, OperationType.DELETE, `customers/${customer.id}`);
                           }
@@ -1855,15 +1835,14 @@ const MachineEditModal = ({
         });
       }
 
-      await batch.commit();
-
       setEditingItem(null);
-      showToast('更新成功');
+      showToast('儲存成功');
+      await batch.commit();
     } catch (err: any) {
       if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-        showToast('更新失敗：資料庫免費額度已滿', 'error');
+        showToast('儲存失敗：資料庫免費額度已滿', 'error');
       } else {
-        showToast('更新失敗', 'error');
+        showToast('儲存失敗', 'error');
       }
       setEditingItem(null);
       handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
@@ -2432,8 +2411,8 @@ const MachineManagement = ({
             addedCount++;
           });
 
+      showToast(`成功初始化 ${addedCount} 個機台！`);
           await batch.commit();
-          showToast(`成功初始化 ${addedCount} 個機台！`);
         } catch (err) {
           handleFirestoreError(err, OperationType.WRITE, 'machines_batch_init');
         }
@@ -2462,9 +2441,9 @@ const MachineManagement = ({
         return;
       }
       const newDocRef = dbDoc('machines');
-      await setDoc(newDocRef, data);
       showToast('機台新增成功');
       reset();
+      await setDoc(newDocRef, data);
     } catch (err: any) {
       console.error(err);
       showToast(err?.message?.includes('Missing or insufficient') ? '資料驗證失敗，請檢查權限或格式！' : '發生錯誤，請稍後再試！', 'error');
@@ -2871,15 +2850,14 @@ const CustomerDetailView = ({
         });
       }
 
-      await batch.commit();
-
       setEditingItem(null);
-      showToast('更新成功');
+      showToast('儲存成功');
+      await batch.commit();
     } catch (err: any) {
       if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-        showToast('更新失敗：資料庫免費額度已滿', 'error');
+        showToast('儲存失敗：資料庫免費額度已滿', 'error');
       } else {
-        showToast('更新失敗', 'error');
+        showToast('儲存失敗', 'error');
       }
       setEditingItem(null);
       handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
@@ -3006,12 +2984,11 @@ const CustomerDetailView = ({
         lastOrderAt: new Date().toISOString()
       }, { merge: true });
 
-      await batch.commit();
-
       setTransferringItem(null);
       setTargetCustomerName('');
       setTransferQuantity(1);
       showToast(`已成功轉讓給 ${trimmedTarget}`);
+      await batch.commit();
     } catch (err: any) {
       console.error("Transfer Error:", err);
       if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
@@ -3030,8 +3007,8 @@ const CustomerDetailView = ({
       const rawIds = item.rawIds || [item.id];
       const existing = releases.find(r => r.orderId === orderId && rawIds.includes(r.itemId) && r.status === 'pending');
       if (existing) {
-        await deleteDoc(dbDoc('releases', existing.id));
         showToast('已取消釋出');
+        await deleteDoc(dbDoc('releases', existing.id));
       } else {
         setReleasingItem({ orderId, item: { ...item, id: rawIds[0] } });
         setReleaseQuantity(item.quantity);
@@ -3060,9 +3037,9 @@ const CustomerDetailView = ({
       if (item.variant) {
         releaseData.variant = item.variant;
       }
-      await setDoc(releaseRef, releaseData);
       showToast('正在釋出中');
       setReleasingItem(null);
+      await setDoc(releaseRef, releaseData);
     } catch (err: any) {
       if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
         showToast('釋出失敗：資料庫免費額度已滿', 'error');
@@ -3222,6 +3199,7 @@ const CustomerDetailView = ({
                       type: 'danger',
                       onConfirm: async () => {
                         try {
+                          showToast('訂單已刪除');
                           await deleteDoc(dbDoc('orders', order.id));
                           
                           // Update customer stats
@@ -3229,8 +3207,6 @@ const CustomerDetailView = ({
                             totalSpent: increment(-order.totalAmount),
                             totalItems: increment(-order.items.reduce((sum, i) => sum + i.quantity, 0))
                           });
-
-                          showToast('訂單已刪除');
                         } catch (err) {
                           handleFirestoreError(err, OperationType.DELETE, `orders/${order.id}`);
                         }
@@ -3897,11 +3873,10 @@ const Dashboard = ({
         }, { merge: true });
       }
 
-      await batch.commit();
-
       showToast('釋出轉移成功！');
       setTransferringRelease(null);
       setTargetCustomerName('');
+      await batch.commit();
     } catch (err: any) {
       if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
         showToast('轉移失敗：資料庫免費額度已滿', 'error');
@@ -4110,11 +4085,11 @@ const SettingsView = ({
         if (!isNaN(numV)) cleanedPriceMap[parseInt(k)] = numV;
       });
 
+      showToast('設定已儲存');
       await setDoc(dbDoc('settings', 'global'), {
         notificationTemplate: template,
         priceMap: cleanedPriceMap
       }, { merge: true });
-      showToast('設定已儲存');
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'settings/global');
     }
@@ -4718,16 +4693,16 @@ export default function App() {
     
     const itemsText = allItems.map(i => `${i.machineName} ${i.variant ? `(${i.variant})` : ''} x ${i.quantity} $${i.subtotal}`).join('\n');
     
-    const upperPart = `親愛的 ${customer.name} 您好，
-您本次的連線購物明細如下：
-
-${itemsText}
-----------------
-消費總額：$${customer.totalSpent.toLocaleString()}`;
-
-    const text = `${upperPart}
-
-${settings.notificationTemplate}`;
+    let text = settings.notificationTemplate || '';
+    if (text && (text.includes('{customerName}') || text.includes('{items}') || text.includes('{totalAmount}'))) {
+      text = text.replace(/{customerName}/g, customer.name);
+      text = text.replace(/{items}/g, itemsText);
+      text = text.replace(/{totalAmount}/g, customer.totalSpent.toLocaleString());
+      text = text.replace(/{orderId}/g, customerOrders.map(o => o.id).join(', '));
+    } else {
+      const upperPart = `親愛的 ${customer.name} 您好，\n您本次的連線購物明細如下：\n\n${itemsText}\n----------------\n消費總額：$${customer.totalSpent.toLocaleString()}`;
+      text = text ? `${upperPart}\n\n${text}` : upperPart;
+    }
     
     navigator.clipboard.writeText(text);
     showToast('已複製通知文字！');
@@ -4739,16 +4714,16 @@ ${settings.notificationTemplate}`;
     const groupedItems = groupItemsHelper(order.items);
     const itemsText = groupedItems.map(i => `${i.machineName} ${i.variant ? `(${i.variant})` : ''} x ${i.quantity} $${i.subtotal}`).join('\n');
     
-    const upperPart = `親愛的 ${order.customerName} 您好，
-您本次的連線購物明細如下：
-
-${itemsText}
-----------------
-消費總額：$${order.totalAmount.toLocaleString()}`;
-
-    const text = `${upperPart}
-
-${settings.notificationTemplate}`;
+    let text = settings.notificationTemplate || '';
+    if (text && (text.includes('{customerName}') || text.includes('{items}') || text.includes('{totalAmount}'))) {
+      text = text.replace(/{customerName}/g, order.customerName);
+      text = text.replace(/{items}/g, itemsText);
+      text = text.replace(/{totalAmount}/g, order.totalAmount.toLocaleString());
+      text = text.replace(/{orderId}/g, order.id);
+    } else {
+      const upperPart = `親愛的 ${order.customerName} 您好，\n您本次的連線購物明細如下：\n\n${itemsText}\n----------------\n消費總額：$${order.totalAmount.toLocaleString()}`;
+      text = text ? `${upperPart}\n\n${text}` : upperPart;
+    }
     
     navigator.clipboard.writeText(text);
     showToast('已複製通知文字！');
@@ -5187,7 +5162,7 @@ ${settings.notificationTemplate}`;
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 50 }}
               className={cn(
-                "fixed bottom-28 left-1/2 -translate-x-1/2 z-[130] px-6 py-3 rounded-full font-bold text-white shadow-xl flex items-center gap-2",
+                "fixed bottom-28 left-1/2 -translate-x-1/2 z-[9999] px-6 py-3 rounded-full font-bold text-white shadow-xl flex items-center gap-2",
                 toast.type === 'success' ? "bg-green-500" : "bg-red-500"
               )}
             >
