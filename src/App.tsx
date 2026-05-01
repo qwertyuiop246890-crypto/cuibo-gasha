@@ -4640,6 +4640,88 @@ export default function App() {
             throw new Error(`Invalid backup: ${key} contains an item without an id`);
           }
         }
+
+        const importedAt = new Date().toISOString();
+        const normalizeOrderItem = (item: any): OrderItem => {
+          const price = Number(item?.price) || 0;
+          const quantity = Number(item?.quantity) || 0;
+          return {
+            id: item?.id || crypto.randomUUID(),
+            machineId: item?.machineId,
+            machineName: typeof item?.machineName === 'string' ? item.machineName : '',
+            price,
+            quantity,
+            variant: item?.variant,
+            subtotal: Number(item?.subtotal) || price * quantity,
+            isReleased: Boolean(item?.isReleased),
+            releaseQuantity: Number(item?.releaseQuantity) || 0,
+            createdAt: typeof item?.createdAt === 'string' ? item.createdAt : importedAt,
+            updatedAt: typeof item?.updatedAt === 'string' ? item.updatedAt : importedAt,
+            isChecked: Boolean(item?.isChecked)
+          };
+        };
+
+        const normalizeImportRecord = (key: string, item: any) => {
+          if (key === 'customers') {
+            return {
+              ...item,
+              name: typeof item.name === 'string' ? item.name : '',
+              totalSpent: Number(item.totalSpent) || 0,
+              totalItems: Number(item.totalItems) || 0,
+              createdAt: typeof item.createdAt === 'string' ? item.createdAt : importedAt,
+              lastOrderAt: typeof item.lastOrderAt === 'string' ? item.lastOrderAt : importedAt
+            };
+          }
+
+          if (key === 'orders') {
+            const items = Array.isArray(item.items) ? item.items.map(normalizeOrderItem) : [];
+            return {
+              ...item,
+              customerId: typeof item.customerId === 'string' ? item.customerId : '',
+              customerName: typeof item.customerName === 'string' ? item.customerName : '',
+              items,
+              totalAmount: Number(item.totalAmount) || items.reduce((sum, orderItem) => sum + orderItem.subtotal, 0),
+              status: ['pending', 'completed', 'cancelled'].includes(item.status) ? item.status : 'pending',
+              createdAt: typeof item.createdAt === 'string' ? item.createdAt : importedAt,
+              updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : importedAt
+            };
+          }
+
+          if (key === 'machines') {
+            return {
+              ...item,
+              name: typeof item.name === 'string' ? item.name : '',
+              defaultPrice: Number(item.defaultPrice) || 0,
+              variants: Array.isArray(item.variants) ? item.variants.filter((variant: any) => typeof variant === 'string') : [],
+              createdAt: typeof item.createdAt === 'string' ? item.createdAt : importedAt,
+              updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : importedAt
+            };
+          }
+
+          if (key === 'releases') {
+            return {
+              ...item,
+              orderId: typeof item.orderId === 'string' ? item.orderId : '',
+              itemId: typeof item.itemId === 'string' ? item.itemId : '',
+              customerName: typeof item.customerName === 'string' ? item.customerName : '',
+              machineName: typeof item.machineName === 'string' ? item.machineName : '',
+              quantity: Number(item.quantity) || 0,
+              price: Number(item.price) || 0,
+              status: ['pending', 'completed', 'cancelled'].includes(item.status) ? item.status : 'pending',
+              createdAt: typeof item.createdAt === 'string' ? item.createdAt : importedAt
+            };
+          }
+
+          return item;
+        };
+
+        const normalizeSettings = (value: any) => ({
+          ...value,
+          notificationTemplate: typeof value?.notificationTemplate === 'string' ? value.notificationTemplate : DEFAULT_NOTIFICATION_TEMPLATE,
+          priceMap: value?.priceMap && typeof value.priceMap === 'object' && !Array.isArray(value.priceMap) ? value.priceMap : DEFAULT_PRICE_MAP,
+          lastBackupAt: typeof value?.lastBackupAt === 'string' ? value.lastBackupAt : importedAt
+        });
+
         setConfirmModal({
           show: true,
           title: '還原資料',
@@ -4661,7 +4743,8 @@ export default function App() {
 
               for (const { key, path } of importCollections) {
                 for (const item of data[key] || []) {
-                  const { id, ...rest } = item;
+                  const normalizedItem = normalizeImportRecord(key, item);
+                  const { id, ...rest } = normalizedItem;
                   currentBatch.set(dbDoc(path, id), rest);
                   operationCount++;
                   await checkBatchLimit();
@@ -4669,7 +4752,7 @@ export default function App() {
               }
               
               if (data.settings) {
-                const { id, ...rest } = data.settings;
+                const { id, ...rest } = normalizeSettings(data.settings);
                 currentBatch.set(dbDoc('settings', 'global'), rest);
                 operationCount++;
                 await checkBatchLimit();

@@ -5,10 +5,81 @@ localforage.config({ name: 'CuiboGasha_DB' });
 const dbState: Record<string, Record<string, any>> = {};
 const listeners: Record<string, Function[]> = {};
 
+function sanitizeDoc(path: string, data: any) {
+  if (!data || typeof data !== 'object') return {};
+  const next = { ...data };
+  const now = new Date().toISOString();
+
+  if (path === 'customers') {
+    next.name = typeof next.name === 'string' ? next.name : '';
+    next.totalSpent = Number(next.totalSpent) || 0;
+    next.totalItems = Number(next.totalItems) || 0;
+    next.createdAt = typeof next.createdAt === 'string' ? next.createdAt : now;
+    next.lastOrderAt = typeof next.lastOrderAt === 'string' ? next.lastOrderAt : now;
+  }
+
+  if (path === 'orders') {
+    next.customerId = typeof next.customerId === 'string' ? next.customerId : '';
+    next.customerName = typeof next.customerName === 'string' ? next.customerName : '';
+    next.items = Array.isArray(next.items) ? next.items.map((item: any) => {
+      const price = Number(item?.price) || 0;
+      const quantity = Number(item?.quantity) || 0;
+      return {
+        ...item,
+        id: item?.id || crypto.randomUUID(),
+        machineName: typeof item?.machineName === 'string' ? item.machineName : '',
+        price,
+        quantity,
+        subtotal: Number(item?.subtotal) || price * quantity,
+        createdAt: typeof item?.createdAt === 'string' ? item.createdAt : now
+      };
+    }) : [];
+    next.totalAmount = Number(next.totalAmount) || next.items.reduce((sum: number, item: any) => sum + (Number(item.subtotal) || 0), 0);
+    next.status = ['pending', 'completed', 'cancelled'].includes(next.status) ? next.status : 'pending';
+    next.createdAt = typeof next.createdAt === 'string' ? next.createdAt : now;
+    next.updatedAt = typeof next.updatedAt === 'string' ? next.updatedAt : now;
+  }
+
+  if (path === 'machines') {
+    next.name = typeof next.name === 'string' ? next.name : '';
+    next.defaultPrice = Number(next.defaultPrice) || 0;
+    next.variants = Array.isArray(next.variants) ? next.variants.filter((variant: any) => typeof variant === 'string') : [];
+    next.createdAt = typeof next.createdAt === 'string' ? next.createdAt : now;
+    next.updatedAt = typeof next.updatedAt === 'string' ? next.updatedAt : now;
+  }
+
+  if (path === 'releases') {
+    next.orderId = typeof next.orderId === 'string' ? next.orderId : '';
+    next.itemId = typeof next.itemId === 'string' ? next.itemId : '';
+    next.customerName = typeof next.customerName === 'string' ? next.customerName : '';
+    next.machineName = typeof next.machineName === 'string' ? next.machineName : '';
+    next.quantity = Number(next.quantity) || 0;
+    next.price = Number(next.price) || 0;
+    next.status = ['pending', 'completed', 'cancelled'].includes(next.status) ? next.status : 'pending';
+    next.createdAt = typeof next.createdAt === 'string' ? next.createdAt : now;
+  }
+
+  if (path === 'settings') {
+    next.notificationTemplate = typeof next.notificationTemplate === 'string' ? next.notificationTemplate : '';
+    next.priceMap = next.priceMap && typeof next.priceMap === 'object' && !Array.isArray(next.priceMap) ? next.priceMap : {};
+    next.lastBackupAt = typeof next.lastBackupAt === 'string' ? next.lastBackupAt : now;
+  }
+
+  return next;
+}
+
+function sanitizeCollection(path: string) {
+  if (!dbState[path]) return;
+  for (const id of Object.keys(dbState[path])) {
+    dbState[path][id] = sanitizeDoc(path, dbState[path][id]);
+  }
+}
+
 async function loadCollection(path: string) {
   if (!dbState[path]) {
     const data = await localforage.getItem(path) || {};
     dbState[path] = data as Record<string, any>;
+    sanitizeCollection(path);
   }
 }
 
@@ -107,9 +178,9 @@ export const onSnapshot = (ref: any, onNext: Function, onError?: Function) => {
 export const setDoc = async (ref: any, data: any, options?: any) => {
   await loadCollection(ref.path);
   if (options && options.merge) {
-    dbState[ref.path][ref.id] = { ...dbState[ref.path][ref.id], ...data };
+    dbState[ref.path][ref.id] = sanitizeDoc(ref.path, { ...dbState[ref.path][ref.id], ...data });
   } else {
-    dbState[ref.path][ref.id] = data;
+    dbState[ref.path][ref.id] = sanitizeDoc(ref.path, data);
   }
   await saveCollection(ref.path);
 };
@@ -124,7 +195,7 @@ export const updateDoc = async (ref: any, data: any) => {
       resolvedData[key] = current + resolvedData[key].val;
     }
   }
-  dbState[ref.path][ref.id] = { ...dbState[ref.path][ref.id], ...resolvedData };
+  dbState[ref.path][ref.id] = sanitizeDoc(ref.path, { ...dbState[ref.path][ref.id], ...resolvedData });
   await saveCollection(ref.path);
 };
 
@@ -205,12 +276,12 @@ export const writeBatch = (db: any) => {
 
         if (op.type === 'set') {
           if (op.options && op.options.merge) {
-            dbState[op.ref.path][op.ref.id] = {
+            dbState[op.ref.path][op.ref.id] = sanitizeDoc(op.ref.path, {
               ...dbState[op.ref.path][op.ref.id],
               ...op.data
-            };
+            });
           } else {
-            dbState[op.ref.path][op.ref.id] = op.data;
+            dbState[op.ref.path][op.ref.id] = sanitizeDoc(op.ref.path, op.data);
           }
         }
 
@@ -222,10 +293,10 @@ export const writeBatch = (db: any) => {
               resolvedData[key] = current + resolvedData[key].val;
             }
           }
-          dbState[op.ref.path][op.ref.id] = {
+          dbState[op.ref.path][op.ref.id] = sanitizeDoc(op.ref.path, {
             ...dbState[op.ref.path][op.ref.id],
             ...resolvedData
-          };
+          });
         }
 
         if (op.type === 'delete' && dbState[op.ref.path]?.[op.ref.id]) {
