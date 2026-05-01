@@ -5,12 +5,18 @@ localforage.config({ name: 'CuiboGasha_DB' });
 const dbState: Record<string, Record<string, any>> = {};
 const listeners: Record<string, Function[]> = {};
 
+function collectionName(path: string) {
+  const parts = path.split('/').filter(Boolean);
+  return parts[parts.length - 1] || path;
+}
+
 function sanitizeDoc(path: string, data: any) {
   if (!data || typeof data !== 'object') return {};
   const next = { ...data };
   const now = new Date().toISOString();
+  const name = collectionName(path);
 
-  if (path === 'customers') {
+  if (name === 'customers') {
     next.name = typeof next.name === 'string' ? next.name : '';
     next.totalSpent = Number(next.totalSpent) || 0;
     next.totalItems = Number(next.totalItems) || 0;
@@ -18,7 +24,7 @@ function sanitizeDoc(path: string, data: any) {
     next.lastOrderAt = typeof next.lastOrderAt === 'string' ? next.lastOrderAt : now;
   }
 
-  if (path === 'orders') {
+  if (name === 'orders') {
     next.customerId = typeof next.customerId === 'string' ? next.customerId : '';
     next.customerName = typeof next.customerName === 'string' ? next.customerName : '';
     next.items = Array.isArray(next.items) ? next.items.map((item: any) => {
@@ -40,7 +46,7 @@ function sanitizeDoc(path: string, data: any) {
     next.updatedAt = typeof next.updatedAt === 'string' ? next.updatedAt : now;
   }
 
-  if (path === 'machines') {
+  if (name === 'machines') {
     next.name = typeof next.name === 'string' ? next.name : '';
     next.defaultPrice = Number(next.defaultPrice) || 0;
     next.variants = Array.isArray(next.variants) ? next.variants.filter((variant: any) => typeof variant === 'string') : [];
@@ -48,7 +54,7 @@ function sanitizeDoc(path: string, data: any) {
     next.updatedAt = typeof next.updatedAt === 'string' ? next.updatedAt : now;
   }
 
-  if (path === 'releases') {
+  if (name === 'releases') {
     next.orderId = typeof next.orderId === 'string' ? next.orderId : '';
     next.itemId = typeof next.itemId === 'string' ? next.itemId : '';
     next.customerName = typeof next.customerName === 'string' ? next.customerName : '';
@@ -59,7 +65,7 @@ function sanitizeDoc(path: string, data: any) {
     next.createdAt = typeof next.createdAt === 'string' ? next.createdAt : now;
   }
 
-  if (path === 'settings') {
+  if (name === 'settings') {
     next.notificationTemplate = typeof next.notificationTemplate === 'string' ? next.notificationTemplate : '';
     next.priceMap = next.priceMap && typeof next.priceMap === 'object' && !Array.isArray(next.priceMap) ? next.priceMap : {};
     next.lastBackupAt = typeof next.lastBackupAt === 'string' ? next.lastBackupAt : now;
@@ -121,12 +127,15 @@ export const doc = (db: any, path: string | any, id?: string) => {
   if (typeof path === 'object' && path.type === 'collection') {
     return { type: 'doc', path: path.path, id: id || crypto.randomUUID() };
   }
+  if (id) {
+    return { type: 'doc', path, id };
+  }
   let finalPath = path;
-  let finalId = id || crypto.randomUUID();
+  let finalId = crypto.randomUUID();
   if (path.includes('/')) {
      const parts = path.split('/');
-     finalPath = parts[0];
-     finalId = parts[1];
+     finalId = parts.pop() || crypto.randomUUID();
+     finalPath = parts.join('/');
   }
   return { type: 'doc', path: finalPath, id: finalId };
 };

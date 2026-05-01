@@ -248,6 +248,118 @@ const normalizeSettings = (id: string, data: any): SystemSettings => ({
   lastBackupAt: typeof data?.lastBackupAt === 'string' ? data.lastBackupAt : new Date().toISOString()
 });
 
+const IMPORT_COLLECTIONS = [
+  { key: 'customers', path: 'customers' },
+  { key: 'orders', path: 'orders' },
+  { key: 'machines', path: 'machines' },
+  { key: 'releases', path: 'releases' },
+] as const;
+
+type ImportCollectionKey = typeof IMPORT_COLLECTIONS[number]['key'];
+
+type PreparedImport = {
+  fileName: string;
+  fileSize: number;
+  counts: Record<ImportCollectionKey, number> & { images: number };
+  warnings: string[];
+  payload: {
+    customers: Customer[];
+    orders: Order[];
+    machines: any[];
+    releases: any[];
+    settings: Omit<SystemSettings, 'id'> | null;
+  };
+};
+
+const formatFileSize = (size: number) => {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const prepareImportPayload = (raw: any, fileName: string, fileSize: number): PreparedImport => {
+  const importedAt = new Date().toISOString();
+  const warnings: string[] = [];
+
+  for (const { key } of IMPORT_COLLECTIONS) {
+    if (raw[key] && !Array.isArray(raw[key])) {
+      throw new Error(`Invalid backup: ${key} must be an array`);
+    }
+
+    const invalidItem = raw[key]?.find((item: any) => !item || typeof item.id !== 'string' || !item.id.trim());
+    if (invalidItem) {
+      throw new Error(`Invalid backup: ${key} contains an item without an id`);
+    }
+  }
+
+  const normalizeImportedOrderItem = (item: any): OrderItem => {
+    const price = Number(item?.price) || 0;
+    const quantity = Number(item?.quantity) || 0;
+    return {
+      id: item?.id || crypto.randomUUID(),
+      machineId: item?.machineId,
+      machineName: typeof item?.machineName === 'string' ? item.machineName : '',
+      price,
+      quantity,
+      variant: item?.variant,
+      subtotal: Number(item?.subtotal) || price * quantity,
+      isReleased: Boolean(item?.isReleased),
+      releaseQuantity: Number(item?.releaseQuantity) || 0,
+      createdAt: typeof item?.createdAt === 'string' ? item.createdAt : importedAt,
+      updatedAt: typeof item?.updatedAt === 'string' ? item.updatedAt : importedAt,
+      isChecked: Boolean(item?.isChecked)
+    };
+  };
+
+  const customers = (raw.customers || []).map((item: any) => normalizeCustomer(item.id, item));
+  const orders = (raw.orders || []).map((item: any) => normalizeOrder(item.id, {
+    ...item,
+    items: Array.isArray(item?.items) ? item.items.map(normalizeImportedOrderItem) : []
+  }));
+  const machines = (raw.machines || []).map((item: any) => normalizeMachine(item.id, item));
+  const releases = (raw.releases || []).map((item: any) => normalizeRelease(item.id, item));
+  const normalizedSettings = raw.settings
+    ? (() => {
+        const { id, ...rest } = normalizeSettings('global', raw.settings);
+        return rest;
+      })()
+    : null;
+
+  const images = machines.filter(machine => typeof machine?.imageUrl === 'string' && machine.imageUrl.trim()).length;
+  const missingOrderItems = (raw.orders || []).filter((order: any) => !Array.isArray(order?.items)).length;
+  const missingMachineVariants = (raw.machines || []).filter((machine: any) => !Array.isArray(machine?.variants)).length;
+
+  if (missingOrderItems > 0) {
+    warnings.push(`${missingOrderItems} orders had missing items and were normalized to empty lists.`);
+  }
+  if (missingMachineVariants > 0) {
+    warnings.push(`${missingMachineVariants} machines had missing variants and were normalized to empty lists.`);
+  }
+  if (!raw.settings) {
+    warnings.push('No settings found in backup. Current default settings will be used.');
+  }
+
+  return {
+    fileName,
+    fileSize,
+    counts: {
+      customers: customers.length,
+      orders: orders.length,
+      machines: machines.length,
+      releases: releases.length,
+      images
+    },
+    warnings,
+    payload: {
+      customers,
+      orders,
+      machines,
+      releases,
+      settings: normalizedSettings
+    }
+  };
+};
+
 // --- Components ---
 
 const SuggestiveInput = ({ 
@@ -4124,14 +4236,22 @@ const SettingsView = ({
   showToast,
   setConfirmModal,
   exportData,
-  importData
+  importData,
+  importPreview,
+  confirmImport,
+  clearImportPreview,
+  importInProgress
 }: { 
   settings: SystemSettings | null, 
   onLogout: () => void,
   showToast: (m: string, t?: 'success' | 'error') => void,
   setConfirmModal: (m: any) => void,
   exportData: () => void,
-  importData: (e: React.ChangeEvent<HTMLInputElement>) => void
+  importData: (e: React.ChangeEvent<HTMLInputElement>) => void,
+  importPreview: PreparedImport | null,
+  confirmImport: () => void,
+  clearImportPreview: () => void,
+  importInProgress: boolean
 }) => {
   const [template, setTemplate] = useState(settings?.notificationTemplate || '');
   const [priceMap, setPriceMap] = useState<Record<number, any>>(settings?.priceMap || DEFAULT_PRICE_MAP);
@@ -4325,6 +4445,45 @@ const SettingsView = ({
             <span className="text-[10px] font-bold">登出系統</span>
           </button>
         </div>
+        {importPreview && (
+          <div className="mt-4 rounded-2xl bg-background p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="break-all text-sm font-bold text-ink">{importPreview.fileName}</p>
+                <p className="mt-1 text-xs text-ink/50">{formatFileSize(importPreview.fileSize)}</p>
+              </div>
+              <button
+                onClick={clearImportPreview}
+                className="rounded-xl bg-card-white px-3 py-2 text-xs font-bold text-ink/60"
+              >
+                清除
+              </button>
+            </div>
+            <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-5">
+              <div className="rounded-xl bg-card-white p-3"><p className="text-[10px] font-bold text-ink/40">顧客</p><p className="text-sm font-bold text-ink">{importPreview.counts.customers}</p></div>
+              <div className="rounded-xl bg-card-white p-3"><p className="text-[10px] font-bold text-ink/40">訂單</p><p className="text-sm font-bold text-ink">{importPreview.counts.orders}</p></div>
+              <div className="rounded-xl bg-card-white p-3"><p className="text-[10px] font-bold text-ink/40">機台</p><p className="text-sm font-bold text-ink">{importPreview.counts.machines}</p></div>
+              <div className="rounded-xl bg-card-white p-3"><p className="text-[10px] font-bold text-ink/40">釋出</p><p className="text-sm font-bold text-ink">{importPreview.counts.releases}</p></div>
+              <div className="rounded-xl bg-card-white p-3"><p className="text-[10px] font-bold text-ink/40">圖片</p><p className="text-sm font-bold text-ink">{importPreview.counts.images}</p></div>
+            </div>
+            {importPreview.warnings.length > 0 && (
+              <div className="mt-4 space-y-2">
+                {importPreview.warnings.map((warning) => (
+                  <div key={warning} className="rounded-xl bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">
+                    {warning}
+                  </div>
+                ))}
+              </div>
+            )}
+            <button
+              onClick={confirmImport}
+              disabled={importInProgress}
+              className="mt-4 w-full rounded-2xl bg-primary-blue py-4 font-bold text-white shadow-lg shadow-primary-blue/20 disabled:opacity-60"
+            >
+              {importInProgress ? '匯入中...' : '開始匯入'}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -4351,6 +4510,8 @@ export default function App() {
   const [machines, setMachines] = useState<any[]>([]);
   const [releases, setReleases] = useState<any[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
+  const [importPreview, setImportPreview] = useState<PreparedImport | null>(null);
+  const [importInProgress, setImportInProgress] = useState(false);
   
   // UI State
   const [isPrinting, setIsPrinting] = useState(false);
@@ -4685,170 +4846,87 @@ export default function App() {
     a.click();
   };
 
+  const applyPreparedImport = async (prepared: PreparedImport) => {
+    try {
+      setImportInProgress(true);
+      let currentBatch = writeBatch(db);
+      let operationCount = 0;
+
+      const checkBatchLimit = async () => {
+        if (operationCount >= 400) {
+          await currentBatch.commit();
+          currentBatch = writeBatch(db);
+          operationCount = 0;
+        }
+      };
+
+      for (const { key, path } of IMPORT_COLLECTIONS) {
+        for (const item of prepared.payload[key]) {
+          const { id, ...rest } = item;
+          currentBatch.set(dbDoc(path, id), rest);
+          operationCount++;
+          await checkBatchLimit();
+        }
+      }
+
+      if (prepared.payload.settings) {
+        currentBatch.set(dbDoc('settings', 'global'), prepared.payload.settings);
+        operationCount++;
+        await checkBatchLimit();
+      }
+
+      if (operationCount > 0) {
+        await currentBatch.commit();
+      }
+
+      setCustomers(prepared.payload.customers);
+      setOrders(prepared.payload.orders);
+      setMachines(prepared.payload.machines);
+      setReleases(prepared.payload.releases);
+      if (prepared.payload.settings) {
+        setSettings({ id: 'global', ...prepared.payload.settings });
+      }
+      setImportPreview(null);
+      showToast('備份資料已匯入');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.toLowerCase().includes('quota')) {
+        showToast('匯入失敗：瀏覽器本地儲存空間不足', 'error');
+      } else {
+        showToast(`匯入失敗：${message}`, 'error');
+      }
+      handleFirestoreError(err, OperationType.WRITE, 'batch_import');
+    } finally {
+      setImportInProgress(false);
+    }
+  };
+
   const importData = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = async (event) => {
+    reader.onload = (event) => {
       try {
         const data = JSON.parse(event.target?.result as string);
-        const importCollections = [
-          { key: 'customers', path: 'customers' },
-          { key: 'orders', path: 'orders' },
-          { key: 'machines', path: 'machines' },
-          { key: 'releases', path: 'releases' },
-        ] as const;
-
-        for (const { key } of importCollections) {
-          if (data[key] && !Array.isArray(data[key])) {
-            throw new Error(`Invalid backup: ${key} must be an array`);
-          }
-
-          const invalidItem = data[key]?.find((item: any) => !item || typeof item.id !== 'string' || !item.id.trim());
-          if (invalidItem) {
-            throw new Error(`Invalid backup: ${key} contains an item without an id`);
-          }
-        }
-
-        const importedAt = new Date().toISOString();
-        const normalizeOrderItem = (item: any): OrderItem => {
-          const price = Number(item?.price) || 0;
-          const quantity = Number(item?.quantity) || 0;
-          return {
-            id: item?.id || crypto.randomUUID(),
-            machineId: item?.machineId,
-            machineName: typeof item?.machineName === 'string' ? item.machineName : '',
-            price,
-            quantity,
-            variant: item?.variant,
-            subtotal: Number(item?.subtotal) || price * quantity,
-            isReleased: Boolean(item?.isReleased),
-            releaseQuantity: Number(item?.releaseQuantity) || 0,
-            createdAt: typeof item?.createdAt === 'string' ? item.createdAt : importedAt,
-            updatedAt: typeof item?.updatedAt === 'string' ? item.updatedAt : importedAt,
-            isChecked: Boolean(item?.isChecked)
-          };
-        };
-
-        const normalizeImportRecord = (key: string, item: any) => {
-          if (key === 'customers') {
-            return {
-              ...item,
-              name: typeof item.name === 'string' ? item.name : '',
-              totalSpent: Number(item.totalSpent) || 0,
-              totalItems: Number(item.totalItems) || 0,
-              createdAt: typeof item.createdAt === 'string' ? item.createdAt : importedAt,
-              lastOrderAt: typeof item.lastOrderAt === 'string' ? item.lastOrderAt : importedAt
-            };
-          }
-
-          if (key === 'orders') {
-            const items = Array.isArray(item.items) ? item.items.map(normalizeOrderItem) : [];
-            return {
-              ...item,
-              customerId: typeof item.customerId === 'string' ? item.customerId : '',
-              customerName: typeof item.customerName === 'string' ? item.customerName : '',
-              items,
-              totalAmount: Number(item.totalAmount) || items.reduce((sum, orderItem) => sum + orderItem.subtotal, 0),
-              status: ['pending', 'completed', 'cancelled'].includes(item.status) ? item.status : 'pending',
-              createdAt: typeof item.createdAt === 'string' ? item.createdAt : importedAt,
-              updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : importedAt
-            };
-          }
-
-          if (key === 'machines') {
-            return {
-              ...item,
-              name: typeof item.name === 'string' ? item.name : '',
-              defaultPrice: Number(item.defaultPrice) || 0,
-              variants: Array.isArray(item.variants) ? item.variants.filter((variant: any) => typeof variant === 'string') : [],
-              createdAt: typeof item.createdAt === 'string' ? item.createdAt : importedAt,
-              updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : importedAt
-            };
-          }
-
-          if (key === 'releases') {
-            return {
-              ...item,
-              orderId: typeof item.orderId === 'string' ? item.orderId : '',
-              itemId: typeof item.itemId === 'string' ? item.itemId : '',
-              customerName: typeof item.customerName === 'string' ? item.customerName : '',
-              machineName: typeof item.machineName === 'string' ? item.machineName : '',
-              quantity: Number(item.quantity) || 0,
-              price: Number(item.price) || 0,
-              status: ['pending', 'completed', 'cancelled'].includes(item.status) ? item.status : 'pending',
-              createdAt: typeof item.createdAt === 'string' ? item.createdAt : importedAt
-            };
-          }
-
-          return item;
-        };
-
-        const normalizeSettings = (value: any) => ({
-          ...value,
-          notificationTemplate: typeof value?.notificationTemplate === 'string' ? value.notificationTemplate : DEFAULT_NOTIFICATION_TEMPLATE,
-          priceMap: value?.priceMap && typeof value.priceMap === 'object' && !Array.isArray(value.priceMap) ? value.priceMap : DEFAULT_PRICE_MAP,
-          lastBackupAt: typeof value?.lastBackupAt === 'string' ? value.lastBackupAt : importedAt
-        });
-
-        setConfirmModal({
-          show: true,
-          title: '還原資料',
-          message: '確定要還原資料嗎？這將會保留現有資料並覆蓋相同 ID 的紀錄。',
-          type: 'danger',
-          onConfirm: async () => {
-            try {
-              const allOperations: (() => void)[] = [];
-              let currentBatch = writeBatch(db);
-              let operationCount = 0;
-
-              const checkBatchLimit = async () => {
-                if (operationCount >= 400) {
-                  await currentBatch.commit();
-                  currentBatch = writeBatch(db);
-                  operationCount = 0;
-                }
-              };
-
-              for (const { key, path } of importCollections) {
-                for (const item of data[key] || []) {
-                  const normalizedItem = normalizeImportRecord(key, item);
-                  const { id, ...rest } = normalizedItem;
-                  currentBatch.set(dbDoc(path, id), rest);
-                  operationCount++;
-                  await checkBatchLimit();
-                }
-              }
-              
-              if (data.settings) {
-                const { id, ...rest } = normalizeSettings(data.settings);
-                currentBatch.set(dbDoc('settings', 'global'), rest);
-                operationCount++;
-                await checkBatchLimit();
-              }
-              
-              if (operationCount > 0) {
-                await currentBatch.commit();
-              }
-              
-              showToast('資料還原成功！');
-            } catch (err: any) {
-              if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-                showToast('還原失敗：資料庫免費額度已滿', 'error');
-              } else {
-                showToast('還原失敗', 'error');
-              }
-              handleFirestoreError(err, OperationType.WRITE, 'batch_import');
-            }
-          }
-        });
+        const prepared = prepareImportPayload(data, file.name, file.size);
+        setImportPreview(prepared);
+        showToast('備份檔已讀取，請確認後開始匯入');
       } catch (err) {
-        showToast('資料格式錯誤！', 'error');
+        console.error(err);
+        showToast('備份檔格式不正確', 'error');
       }
     };
     reader.readAsText(file);
   };
+
+  const confirmImport = () => {
+    if (!importPreview) return;
+    applyPreparedImport(importPreview);
+  };
+
+  const clearImportPreview = () => setImportPreview(null);
 
   const clearData = async () => {
     setConfirmModal({
@@ -4982,6 +5060,10 @@ export default function App() {
                   setConfirmModal={setConfirmModal}
                   exportData={exportData}
                   importData={importData}
+                  importPreview={importPreview}
+                  confirmImport={confirmImport}
+                  clearImportPreview={clearImportPreview}
+                  importInProgress={importInProgress}
                 />
               )}
             </motion.div>
