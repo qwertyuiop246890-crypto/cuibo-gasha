@@ -1,0 +1,426 @@
+51-      photoUrl: string | null;
+52-    }[];
+53-  }
+54-}
+55-
+56:const handleFirestoreError = (error: unknown, operationType: OperationType, path: string | null) => {
+57-  const errInfo: FirestoreErrorInfo = {
+58-    error: error instanceof Error ? error.message : String(error),
+59-    authInfo: {
+60-      userId: auth.currentUser?.uid,
+61-      email: auth.currentUser?.email,
+--
+774-            totalItems: 0,
+775-            createdAt: now,
+776-            lastOrderAt: now
+777-          };
+778-          setDoc(newCustRef, newCust).catch(err => {
+779:            try { handleFirestoreError(err, OperationType.CREATE, 'customers'); } catch(e){}
+780-          });
+781-          customerId = newCustRef.id;
+782-          customer = { id: customerId, ...newCust };
+783-        }
+784-
+--
+815-          updateDoc(dbDoc('orders', existingOrder.id), {
+816-            items: updatedItems,
+817-            totalAmount: existingOrder.totalAmount + totalAddedAmount,
+818-            updatedAt: now
+819-          }).catch(err => {
+820:            try { handleFirestoreError(err, OperationType.UPDATE, `orders/${existingOrder!.id}`); } catch(e){}
+821-          });
+822-        } else {
+823-          // Create new order
+824-          const orderRef = dbDoc('orders');
+825-          const newOrder: Omit<Order, 'id'> = {
+--
+830-            status: 'pending',
+831-            createdAt: now,
+832-            updatedAt: now
+833-          };
+834-          setDoc(orderRef, newOrder).catch(err => {
+835:            try { handleFirestoreError(err, OperationType.CREATE, 'orders'); } catch(e){}
+836-          });
+837-        }
+838-        
+839-        // 3. Update customer stats
+840-        updateDoc(dbDoc('customers', customerId!), {
+841-          totalSpent: increment(totalAddedAmount),
+842-          totalItems: increment(totalAddedQuantity),
+843-          lastOrderAt: now
+844-        }).catch(err => {
+845:            try { handleFirestoreError(err, OperationType.UPDATE, `customers/${customerId}`); } catch(e){}
+846-        });
+847-      }
+848-
+849-      // 4. Update Machine Variants and Image
+850-      const machine = machines.find(m => m.name === machineName);
+--
+857-        if (uploadedImage && machine.imageUrl !== uploadedImage) {
+858-          updates.imageUrl = uploadedImage;
+859-        }
+860-        if (Object.keys(updates).length > 1) { // more than just updatedAt
+861-          updateDoc(dbDoc('machines', machine.id), updates).catch(err => {
+862:            try { handleFirestoreError(err, OperationType.UPDATE, `machines/${machine.id}`); } catch(e){}
+863-          });
+864-        }
+865-      } else {
+866-        const machineRef = dbDoc('machines');
+867-        const newMachine: any = {
+--
+873-        };
+874-        if (uploadedImage) {
+875-          newMachine.imageUrl = uploadedImage;
+876-        }
+877-        setDoc(machineRef, newMachine).catch(err => {
+878:            try { handleFirestoreError(err, OperationType.CREATE, 'machines'); } catch(e){}
+879-        });
+880-      }
+881-
+882-      showToast(totalAddedQuantity > 0 ? '訂單已更新/建立！' : '機台資料已建立！');
+883-
+--
+1195-
+1196-      setEditingItem(null);
+1197-      showToast('更新成功');
+1198-    } catch (err) {
+1199-      setEditingItem(null);
+1200:      handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
+1201-    }
+1202-  };
+1203-
+1204-  const handleToggleCheck = async (orderId: string, item: OrderItem) => {
+1205-    try {
+--
+1213-      await updateDoc(dbDoc('orders', orderId), {
+1214-        items: newItems,
+1215-        // no update to order updatedAt due to simple checkbox toggle, or optionally add later
+1216-      });
+1217-    } catch (err) {
+1218:      handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
+1219-    }
+1220-  };
+1221-
+1222-  // Flatten and mix in order metadata
+1223-  const flattenedItems = orders.flatMap(order => 
+--
+1480-                              totalItems: increment(-editingItem.item.quantity)
+1481-                            });
+1482-                            
+1483-                            showToast('項目已刪除');
+1484-                          } catch (err) {
+1485:                            handleFirestoreError(err, OperationType.WRITE, `orders/${order.id}`);
+1486-                          }
+1487-                        }
+1488-                      });
+1489-                    }}
+1490-                    className="p-4 bg-red-50 text-red-500 rounded-2xl"
+--
+1571-        });
+1572-      });
+1573-      await batch.commit();
+1574-      showToast('所有顧客數據已同步');
+1575-    } catch (err) {
+1576:      handleFirestoreError(err, OperationType.WRITE, 'customers_sync');
+1577-    }
+1578-  };
+1579-
+1580-  const sortedCustomers = [...customers]
+1581-    .filter(c => c.name.toLowerCase().includes(searchTerm.toLowerCase()))
+--
+1713-                            }
+1714-                            
+1715-                            await batch.commit();
+1716-                            showToast('顧客已刪除');
+1717-                          } catch (err) {
+1718:                            handleFirestoreError(err, OperationType.DELETE, `customers/${customer.id}`);
+1719-                          }
+1720-                        }
+1721-                      });
+1722-                    }}
+1723-                    className="p-2 text-ink/20 hover:text-red-500 hover:bg-red-50 rounded-xl transition-colors"
+--
+1845-
+1846-      setEditingItem(null);
+1847-      showToast('更新成功');
+1848-    } catch (err) {
+1849-      setEditingItem(null);
+1850:      handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
+1851-    }
+1852-  };
+1853-
+1854-  const machineOrders = orders
+1855-    .filter(o => o.items.some(i => i.machineName === machine.name))
+--
+2300-                              totalItems: increment(-editingItem.item.quantity)
+2301-                            });
+2302-                            
+2303-                            showToast('項目已刪除');
+2304-                          } catch (err) {
+2305:                            handleFirestoreError(err, OperationType.WRITE, `orders/${order.id}`);
+2306-                          }
+2307-                        }
+2308-                      });
+2309-                    }}
+2310-                    className="p-4 bg-red-50 text-red-500 rounded-2xl"
+--
+2406-          });
+2407-
+2408-          await batch.commit();
+2409-          showToast(`成功初始化 ${addedCount} 個機台！`);
+2410-        } catch (err) {
+2411:          handleFirestoreError(err, OperationType.WRITE, 'machines_batch_init');
+2412-        }
+2413-      }
+2414-    });
+2415-  };
+2416-
+--
+2781-
+2782-      await batch.commit();
+2783-      showToast('顧客名稱已更新');
+2784-      setIsEditingName(false);
+2785-    } catch (err) {
+2786:      handleFirestoreError(err, OperationType.WRITE, `customers/${customer.id}`);
+2787-    }
+2788-  };
+2789-
+2790-  const handleRecalculateStats = async () => {
+2791-    try {
+--
+2796-        totalSpent: actualTotalSpent,
+2797-        totalItems: actualTotalItems
+2798-      });
+2799-      showToast('數據已重新計算並同步');
+2800-    } catch (err) {
+2801:      handleFirestoreError(err, OperationType.WRITE, `customers/${customer.id}`);
+2802-    }
+2803-  };
+2804-
+2805-  useEffect(() => {
+2806-    // Auto-sync if stats look wrong (e.g. 0 items but has orders)
+--
+2848-
+2849-      setEditingItem(null);
+2850-      showToast('更新成功');
+2851-    } catch (err) {
+2852-      setEditingItem(null);
+2853:      handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
+2854-    }
+2855-  };
+2856-
+2857-  const handleTransfer = async () => {
+2858-    if (!transferringItem || !targetCustomerName.replace(/\s+/g, '') || transferQuantity < 1) return;
+--
+2948-
+2949-      setTransferringItem(null);
+2950-      setTargetCustomerName('');
+2951-      showToast(`已轉讓給 ${trimmedTarget}`);
+2952-    } catch (err) {
+2953:      handleFirestoreError(err, OperationType.WRITE, 'transfer');
+2954-    }
+2955-  };
+2956-
+2957-  const handleReleaseToggle = async (orderId: string, item: OrderItem & { rawIds?: string[] }) => {
+2958-    try {
+--
+2964-      } else {
+2965-        setReleasingItem({ orderId, item: { ...item, id: rawIds[0] } });
+2966-        setReleaseQuantity(item.quantity);
+2967-      }
+2968-    } catch (err) {
+2969:      handleFirestoreError(err, OperationType.WRITE, 'releases');
+2970-    }
+2971-  };
+2972-
+2973-  const handleConfirmRelease = async () => {
+2974-    if (!releasingItem || releaseQuantity < 1) return;
+--
+2990-      }
+2991-      await setDoc(releaseRef, releaseData);
+2992-      showToast('正在釋出中');
+2993-      setReleasingItem(null);
+2994-    } catch (err) {
+2995:      handleFirestoreError(err, OperationType.WRITE, 'releases');
+2996-    }
+2997-  };
+2998-
+2999-  const groupOrderItems = (order: Order) => {
+3000-    const grouped: (OrderItem & { rawIds: string[] })[] = [];
+--
+3145-                            totalItems: increment(-order.items.reduce((sum, i) => sum + i.quantity, 0))
+3146-                          });
+3147-
+3148-                          showToast('訂單已刪除');
+3149-                        } catch (err) {
+3150:                          handleFirestoreError(err, OperationType.DELETE, `orders/${order.id}`);
+3151-                        }
+3152-                      }
+3153-                    });
+3154-                  }}
+3155-                  className="p-2 text-red-400 hover:bg-red-50 rounded-xl transition-colors"
+--
+3348-                              totalItems: increment(-editingItem.item.quantity)
+3349-                            });
+3350-                            
+3351-                            showToast('項目已刪除');
+3352-                          } catch (err) {
+3353:                            handleFirestoreError(err, OperationType.WRITE, `orders/${order.id}`);
+3354-                          }
+3355-                        }
+3356-                      });
+3357-                    }}
+3358-                    className="p-4 bg-red-50 text-red-500 rounded-2xl"
+--
+3778-
+3779-      showToast('釋出轉移成功！');
+3780-      setTransferringRelease(null);
+3781-      setTargetCustomerName('');
+3782-    } catch (err) {
+3783:      handleFirestoreError(err, OperationType.WRITE, `releases/${release.id}`);
+3784-    }
+3785-  };
+3786-
+3787-  return (
+3788-    <div className="space-y-6 pb-24">
+--
+3977-        notificationTemplate: template,
+3978-        priceMap: cleanedPriceMap
+3979-      });
+3980-      showToast('設定已儲存');
+3981-    } catch (err) {
+3982:      handleFirestoreError(err, OperationType.WRITE, 'settings/global');
+3983-    }
+3984-  };
+3985-
+3986-  const addPriceMapping = () => {
+3987-    const jpy = parseInt(newJpy);
+--
+4012-            const deletePromises = snapshot.docs.map(d => deleteDoc(d.ref));
+4013-            await Promise.all(deletePromises);
+4014-          }
+4015-          showToast('全部資料已清除');
+4016-        } catch (err) {
+4017:          handleFirestoreError(err, OperationType.DELETE, 'multiple_collections');
+4018-        }
+4019-      }
+4020-    });
+4021-  };
+4022-
+--
+4188-  const [autoSync, setAutoSyncState] = useState<boolean>(() => localStorage.getItem('cuibo_gasha_autosync') === 'true');
+4189-  const [showSyncPrompt, setShowSyncPrompt] = useState<boolean>(false);
+4190-  const [quotaExceededError, setQuotaExceededError] = useState<boolean>(false);
+4191-
+4192-  useEffect(() => {
+4193:    const handleFirestoreErrorEvent = (e: any) => {
+4194-      const errInfo = e.detail;
+4195-      if (errInfo && errInfo.error && (errInfo.error.toLowerCase().includes('quota') || errInfo.error.includes('Quota exceeded'))) {
+4196-        setQuotaExceededError(true);
+4197-      }
+4198-    };
+4199:    window.addEventListener('firestore-error', handleFirestoreErrorEvent);
+4200:    return () => window.removeEventListener('firestore-error', handleFirestoreErrorEvent);
+4201-  }, []);
+4202-
+4203-  const setAutoSync = (val: boolean) => {
+4204-    localStorage.setItem('cuibo_gasha_autosync', String(val));
+4205-    setAutoSyncState(val);
+--
+4258-        showToast('強制下載完成！');
+4259-      }, 2000);
+4260-    } catch (e: any) {
+4261-      if (e?.message?.toLowerCase().includes('quota') || String(e).toLowerCase().includes('quota')) {
+4262-        showToast('下載失敗：資料庫免費額度已滿', 'error');
+4263:        handleFirestoreError(e, OperationType.GET, 'settings/global');
+4264-      } else {
+4265-        showToast(`下載失敗：${e?.message || '未知錯誤'}`, 'error');
+4266-      }
+4267-    }
+4268-  };
+--
+4365-
+4366-      await batch.commit();
+4367-      showToast(syncWithOrders ? '機台設定與訂單已同步更新' : '機台設定已儲存');
+4368-      setEditingMachine(null);
+4369-    } catch (err) {
+4370:      handleFirestoreError(err, OperationType.WRITE, 'machines_sync');
+4371-    }
+4372-  };
+4373-
+4374-  const handleDeleteMachine = (machineId: string, machineName: string) => {
+4375-    setConfirmModal({
+--
+4421-
+4422-          await batch.commit();
+4423-          showToast('機台已刪除');
+4424-          setEditingMachine(null);
+4425-        } catch (err) {
+4426:          handleFirestoreError(err, OperationType.DELETE, `machines/${machineId}`);
+4427-        }
+4428-      }
+4429-    });
+4430-  };
+4431-
+--
+4466-    };
+4467-    testConnection();
+4468-
+4469-    const unsubCustomers = onSnapshot(query(col('customers'), orderBy('createdAt', 'desc')), (snap) => {
+4470-      setCustomers(snap.docs.map(d => ({ id: d.id, ...d.data() } as Customer)));
+4471:    }, (err) => handleFirestoreError(err, OperationType.LIST, 'customers'));
+4472-
+4473-    const unsubOrders = onSnapshot(query(col('orders'), orderBy('createdAt', 'desc')), (snap) => {
+4474-      setOrders(snap.docs.map(d => ({ id: d.id, ...d.data() } as Order)));
+4475:    }, (err) => handleFirestoreError(err, OperationType.LIST, 'orders'));
+4476-
+4477-    const unsubMachines = onSnapshot(query(col('machines'), orderBy('name', 'asc')), (snap) => {
+4478-      setMachines(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+4479:    }, (err) => handleFirestoreError(err, OperationType.LIST, 'machines'));
+4480-
+4481-    const unsubReleases = onSnapshot(query(col('releases'), orderBy('createdAt', 'desc')), (snap) => {
+4482-      setReleases(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+4483:    }, (err) => handleFirestoreError(err, OperationType.LIST, 'releases'));
+4484-
+4485-    const unsubSettings = onSnapshot(dbDoc('settings', 'global'), (snap) => {
+4486-      if (snap.exists()) {
+4487-        setSettings({ id: snap.id, ...snap.data() } as SystemSettings);
+4488-      } else {
+--
+4490-        const defaultSettings: Omit<SystemSettings, 'id'> = {
+4491-          notificationTemplate: DEFAULT_NOTIFICATION_TEMPLATE,
+4492-          priceMap: DEFAULT_PRICE_MAP,
+4493-          lastBackupAt: new Date().toISOString()
+4494-        };
+4495:        setDoc(dbDoc('settings', 'global'), defaultSettings).catch(err => handleFirestoreError(err, OperationType.WRITE, 'settings/global'));
+4496-      }
+4497:    }, (err) => handleFirestoreError(err, OperationType.GET, 'settings/global'));
+4498-
+4499-    return () => {
+4500-      unsubCustomers();
+4501-      unsubOrders();
+4502-      unsubMachines();
+--
+4646-              }
+4647-              
+4648-              await batch.commit();
+4649-              showToast('資料還原成功！');
+4650-            } catch (err) {
+4651:              handleFirestoreError(err, OperationType.WRITE, 'batch_import');
+4652-            }
+4653-          }
+4654-        });
+4655-      } catch (err) {
+4656-        showToast('資料格式錯誤！', 'error');
+--
+4671-          customers.forEach(c => batch.delete(dbDoc('customers', c.id)));
+4672-          orders.forEach(o => batch.delete(dbDoc('orders', o.id)));
+4673-          await batch.commit();
+4674-          showToast('資料已清空。');
+4675-        } catch (err) {
+4676:          handleFirestoreError(err, OperationType.DELETE, 'batch_clear');
+4677-        }
+4678-      }
+4679-    });
+4680-  };
+4681-

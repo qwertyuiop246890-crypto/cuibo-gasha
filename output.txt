@@ -1,0 +1,68 @@
+770:          const newCustRef = dbDoc('customers');
+815:          updateDoc(dbDoc('orders', existingOrder.id), {
+824:          const orderRef = dbDoc('orders');
+840:        updateDoc(dbDoc('customers', customerId!), {
+861:          updateDoc(dbDoc('machines', machine.id), updates).catch(err => {
+866:        const machineRef = dbDoc('machines');
+1179:      await updateDoc(dbDoc('orders', orderId), {
+1188:        await updateDoc(dbDoc('customers', order.customerId), {
+1213:      await updateDoc(dbDoc('orders', orderId), {
+1468:                              await deleteDoc(dbDoc('orders', order.id));
+1470:                              await updateDoc(dbDoc('orders', order.id), {
+1478:                            await updateDoc(dbDoc('customers', order.customerId), {
+1567:        batch.update(dbDoc('customers', customer.id), {
+1706:                            batch.delete(dbDoc('customers', customer.id));
+1711:                                batch.delete(dbDoc('orders', order.id));
+1830:      await updateDoc(dbDoc('orders', orderId), {
+1838:        await updateDoc(dbDoc('customers', order.customerId), {
+2288:                              await deleteDoc(dbDoc('orders', order.id));
+2290:                              await updateDoc(dbDoc('orders', order.id), {
+2298:                            await updateDoc(dbDoc('customers', order.customerId), {
+2397:            const newDocRef = dbDoc('machines');
+2437:      const newDocRef = dbDoc('machines');
+2769:      batch.update(dbDoc('customers', customer.id), { name: newName });
+2773:        batch.update(dbDoc('orders', order.id), { customerName: newName });
+2779:        batch.update(dbDoc('releases', release.id), { customerName: newName });
+2795:      await updateDoc(dbDoc('customers', customer.id), {
+2832:      await updateDoc(dbDoc('orders', orderId), {
+2841:        await updateDoc(dbDoc('customers', customer.id), {
+2875:        const newCustRef = dbDoc('customers');
+2908:      await updateDoc(dbDoc('orders', orderId), {
+2913:      await updateDoc(dbDoc('customers', customer.id), {
+2927:        await updateDoc(dbDoc('orders', targetOrder.id), {
+2933:        await setDoc(dbDoc('orders'), {
+2943:      await updateDoc(dbDoc('customers', targetId!), {
+2962:        await deleteDoc(dbDoc('releases', existing.id));
+2977:      const releaseRef = dbDoc('releases');
+3140:                          await deleteDoc(dbDoc('orders', order.id));
+3143:                          await updateDoc(dbDoc('customers', order.customerId), {
+3336:                              await deleteDoc(dbDoc('orders', order.id));
+3338:                              await updateDoc(dbDoc('orders', order.id), {
+3346:                            await updateDoc(dbDoc('customers', order.customerId), {
+3685:        const newCustRef = dbDoc('customers');
+3699:      await updateDoc(dbDoc('releases', release.id), { status: 'completed' });
+3702:      const orderRef = dbDoc('orders', release.orderId);
+3736:          await updateDoc(dbDoc('customers', orderData.customerId), {
+3756:          await updateDoc(dbDoc('orders', targetOrder.id), {
+3762:          await setDoc(dbDoc('orders'), {
+3772:        await updateDoc(dbDoc('customers', targetId!), {
+3976:      await updateDoc(dbDoc('settings', 'global'), {
+4255:      await getDocFromServer(dbDoc('settings', 'global'));
+4305:        batch.update(dbDoc('machines', data.id), updateData);
+4307:        const newDocRef = dbDoc('machines');
+4350:            batch.update(dbDoc('orders', order.id), { 
+4360:          batch.update(dbDoc('customers', customerId), {
+4384:          batch.delete(dbDoc('machines', machineId));
+4393:                batch.delete(dbDoc('orders', order.id));
+4403:                batch.update(dbDoc('orders', order.id), {
+4415:              batch.update(dbDoc('customers', customerId), {
+4460:        await getDocFromServer(dbDoc('settings', 'connection_test'));
+4485:    const unsubSettings = onSnapshot(dbDoc('settings', 'global'), (snap) => {
+4495:        setDoc(dbDoc('settings', 'global'), defaultSettings).catch(err => handleFirestoreError(err, OperationType.WRITE, 'settings/global'));
+4618:                  batch.set(dbDoc('customers', id), rest);
+4625:                  batch.set(dbDoc('orders', id), rest);
+4632:                  batch.set(dbDoc('machines', id), rest);
+4639:                  batch.set(dbDoc('releases', id), rest);
+4645:                batch.set(dbDoc('settings', 'global'), rest);
+4671:          customers.forEach(c => batch.delete(dbDoc('customers', c.id)));
+4672:          orders.forEach(o => batch.delete(dbDoc('orders', o.id)));

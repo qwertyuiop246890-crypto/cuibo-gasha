@@ -10,17 +10,17 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut, User
-} from 'firebase/auth';
+} from './mockAuth';
 import { GoogleGenAI, Type } from '@google/genai';
 import { 
   collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, 
   query, orderBy, serverTimestamp, getDoc, getDocs, writeBatch,
   getDocFromServer, increment, enableNetwork, disableNetwork, waitForPendingWrites
-} from 'firebase/firestore';
+} from './mockFirestore';
 import { useReactToPrint } from 'react-to-print';
 import { format } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
-import { auth, db, col, dbDoc } from './firebase';
+import { auth, db, col, dbDoc } from './mockFirebase';
 import { cn } from './lib/utils';
 import { Customer, Order, OrderItem, SystemSettings } from './types';
 
@@ -315,7 +315,13 @@ const Header = ({ user, activeTab }: { user: User, activeTab: string }) => {
           <p className="text-sm font-bold text-ink">{user.displayName}</p>
           <p className="text-[10px] text-ink/50">{user.email}</p>
         </div>
-        <img src={user.photoURL || ''} className="w-10 h-10 rounded-full border-2 border-card-white shadow-sm" alt="User" />
+        {user.photoURL ? (
+          <img src={user.photoURL} className="w-10 h-10 rounded-full border-2 border-card-white shadow-sm" alt="User" />
+        ) : (
+          <div className="w-10 h-10 rounded-full border-2 border-card-white shadow-sm bg-primary-blue/10 flex items-center justify-center text-primary-blue font-bold">
+            {user.displayName?.charAt(0) || user.email?.charAt(0) || 'U'}
+          </div>
+        )}
       </div>
     </header>
   );
@@ -951,7 +957,7 @@ const CreateOrder = ({
         {uploadedImage && (
           <div className="mb-6 relative group cursor-pointer" onClick={() => setIsFullscreenImage(true)}>
             <div className="w-full h-80 sm:h-96 rounded-2xl overflow-hidden bg-background border border-divider relative">
-              <img src={uploadedImage} alt="Uploaded" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+              <img src={uploadedImage || undefined} alt="Uploaded" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
               <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center">
                 <span className="bg-black/50 text-white px-3 py-1 rounded-full text-xs opacity-0 group-hover:opacity-100 transition-opacity">點擊放大</span>
               </div>
@@ -1112,7 +1118,7 @@ const CreateOrder = ({
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
-              src={uploadedImage} 
+              src={uploadedImage || undefined} 
               alt="Fullscreen" 
               className="max-w-full max-h-full object-contain rounded-lg"
               referrerPolicy="no-referrer"
@@ -1322,7 +1328,7 @@ const OrdersList = ({
                     }}
                   >
                     {machine?.imageUrl ? (
-                      <img src={machine.imageUrl} alt={item.machineName} className="w-full h-full object-cover relative z-10 transition-transform group-hover:scale-110" referrerPolicy="no-referrer" />
+                      <img src={machine.imageUrl || undefined} alt={item.machineName} className="w-full h-full object-cover relative z-10 transition-transform group-hover:scale-110" referrerPolicy="no-referrer" />
                     ) : (
                       <Package className="w-5 h-5 text-ink/20 relative z-10" />
                     )}
@@ -2061,7 +2067,7 @@ const MachineEditModal = ({
             {uploadedImage ? (
               <div className="relative group">
                 <div className="w-full h-48 rounded-2xl overflow-hidden bg-card-white border border-divider">
-                  <img src={uploadedImage} alt="Machine" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+                  <img src={uploadedImage || undefined} alt="Machine" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
                 </div>
                 <button 
                   onClick={() => setUploadedImage(null)}
@@ -2675,7 +2681,7 @@ const MachineManagement = ({
                   viewMode === 'grid-sm' ? "h-24" : "h-48"
                 )}>
                   {config?.imageUrl ? (
-                    <img src={config.imageUrl} alt={machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                    <img src={config.imageUrl || undefined} alt={machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                   ) : (
                     <Package className="w-8 h-8 text-ink/10" />
                   )}
@@ -2686,7 +2692,7 @@ const MachineManagement = ({
                 {viewMode === 'list' && (
                   <div className="w-12 h-12 bg-background rounded-2xl flex items-center justify-center overflow-hidden flex-shrink-0">
                     {config?.imageUrl ? (
-                      <img src={config.imageUrl} alt={machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                      <img src={config.imageUrl || undefined} alt={machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                     ) : (
                       <Package className="w-6 h-6 text-ink/20" />
                     )}
@@ -3248,7 +3254,7 @@ const CustomerDetailView = ({
                           }}
                         >
                           {machine?.imageUrl ? (
-                            <img src={machine.imageUrl} alt={item.machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                            <img src={machine.imageUrl || undefined} alt={item.machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                           ) : (
                             <Package className="w-5 h-5 text-ink/20" />
                           )}
@@ -4048,22 +4054,14 @@ const SettingsView = ({
   showToast,
   setConfirmModal,
   exportData,
-  importData,
-  autoSync,
-  setAutoSync,
-  manualUpload,
-  manualDownload
+  importData
 }: { 
   settings: SystemSettings | null, 
   onLogout: () => void,
   showToast: (m: string, t?: 'success' | 'error') => void,
   setConfirmModal: (m: any) => void,
   exportData: () => void,
-  importData: (e: React.ChangeEvent<HTMLInputElement>) => void,
-  autoSync: boolean,
-  setAutoSync: (val: boolean) => void,
-  manualUpload: () => void,
-  manualDownload: () => void
+  importData: (e: React.ChangeEvent<HTMLInputElement>) => void
 }) => {
   const [template, setTemplate] = useState(settings?.notificationTemplate || '');
   const [priceMap, setPriceMap] = useState<Record<number, any>>(settings?.priceMap || DEFAULT_PRICE_MAP);
@@ -4230,35 +4228,6 @@ const SettingsView = ({
       </button>
 
       <div className="bg-card-white p-6 rounded-3xl card-shadow">
-        <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest mb-4 flex items-center justify-between">
-          <span>雲端同步</span>
-          <label className="flex items-center gap-2 cursor-pointer group">
-            <div className={`relative flex items-center w-10 h-6 rounded-full transition-colors ${autoSync ? 'bg-primary-blue' : 'bg-ink/20'}`}>
-              <input type="checkbox" className="hidden" checked={autoSync} onChange={(e) => setAutoSync(e.target.checked)} />
-              <div className={`absolute left-1 w-4 h-4 bg-white rounded-full transition-transform ${autoSync ? 'translate-x-4' : 'translate-x-0'}`}></div>
-            </div>
-            <span className="text-xs font-bold text-ink/60">自動同步到 Firebase</span>
-          </label>
-        </h3>
-        
-        <p className="text-[10px] text-ink/40 mb-4 bg-background p-3 rounded-lg leading-relaxed">
-          開啟時，資料會自動備份到 Firebase 並從雲端即時更新，此動作會消耗額度。
-          <br/>關閉時，您完全使用本地端資料，節省額度，並且不受網路限制。
-        </p>
-
-        <div className="grid grid-cols-2 gap-3">
-          <button onClick={manualUpload} className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors">
-            <Upload className="w-5 h-5 text-primary-blue" />
-            <span className="text-[10px] font-bold text-primary-blue">強制上傳至雲端</span>
-          </button>
-          <button onClick={manualDownload} className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors">
-            <Download className="w-5 h-5 text-orange-500" />
-            <span className="text-[10px] font-bold text-orange-500">從雲端強制下載</span>
-          </button>
-        </div>
-      </div>
-
-      <div className="bg-card-white p-6 rounded-3xl card-shadow">
         <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest mb-4">系統維護</h3>
         <div className="grid grid-cols-2 gap-3">
           <button onClick={exportData} className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors">
@@ -4315,87 +4284,7 @@ export default function App() {
   
   // UI State
   const [isPrinting, setIsPrinting] = useState(false);
-  const [autoSync, setAutoSyncState] = useState<boolean>(() => localStorage.getItem('cuibo_gasha_autosync') === 'true');
-  const [showSyncPrompt, setShowSyncPrompt] = useState<boolean>(false);
-  const [quotaExceededError, setQuotaExceededError] = useState<boolean>(false);
 
-  useEffect(() => {
-    const handleFirestoreErrorEvent = (e: any) => {
-      const errInfo = e.detail;
-      if (errInfo && errInfo.error && (errInfo.error.toLowerCase().includes('quota') || errInfo.error.includes('Quota exceeded'))) {
-        setQuotaExceededError(true);
-      }
-    };
-    window.addEventListener('firestore-error', handleFirestoreErrorEvent);
-    return () => window.removeEventListener('firestore-error', handleFirestoreErrorEvent);
-  }, []);
-
-  const setAutoSync = (val: boolean) => {
-    localStorage.setItem('cuibo_gasha_autosync', String(val));
-    setAutoSyncState(val);
-  };
-
-  useEffect(() => {
-    if (!user) return;
-    if (localStorage.getItem('cuibo_gasha_autosync_prompted') !== 'true') {
-      setShowSyncPrompt(true);
-    }
-  }, [user]);
-
-  const [networkReady, setNetworkReady] = useState(false);
-
-  useEffect(() => {
-    if (!user) return;
-    const updateNetwork = async () => {
-      try {
-        if (autoSync) {
-          await enableNetwork(db);
-        } else {
-          await disableNetwork(db);
-        }
-      } catch (e) {
-        console.error('Network toggle error', e);
-      } finally {
-        setNetworkReady(true);
-      }
-    };
-    updateNetwork();
-  }, [user, autoSync]);
-
-  const manualUpload = async () => {
-    try {
-      showToast('開始強制上傳到雲端...');
-      await enableNetwork(db);
-      await waitForPendingWrites(db);
-      if (!autoSync) await disableNetwork(db);
-      showToast('強制上傳完成！');
-    } catch (e: any) {
-      if (e?.message?.toLowerCase().includes('quota') || String(e).toLowerCase().includes('quota')) {
-        showToast('上傳失敗：資料庫免費額度已滿', 'error');
-      } else {
-        showToast(`上傳失敗：${e?.message || '未知錯誤'}`, 'error');
-      }
-    }
-  };
-
-  const manualDownload = async () => {
-    try {
-      showToast('開始強制從雲端下載...');
-      await enableNetwork(db);
-      await getDocFromServer(dbDoc('settings', 'global'));
-      setTimeout(async () => {
-        if (!autoSync) await disableNetwork(db);
-        showToast('強制下載完成！');
-      }, 2000);
-    } catch (e: any) {
-      if (e?.message?.toLowerCase().includes('quota') || String(e).toLowerCase().includes('quota')) {
-        showToast('下載失敗：資料庫免費額度已滿', 'error');
-        handleFirestoreError(e, OperationType.GET, 'settings/global');
-      } else {
-        showToast(`下載失敗：${e?.message || '未知錯誤'}`, 'error');
-      }
-    }
-  };
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [confirmModal, setConfirmModal] = useState<{
     show: boolean;
@@ -4595,20 +4484,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!user || !networkReady) return;
-
-    // Test connection
-    const testConnection = async () => {
-      if (!autoSync) return;
-      try {
-        await getDocFromServer(dbDoc('settings', 'connection_test'));
-      } catch (error) {
-        if (error instanceof Error && error.message.includes('the client is offline')) {
-          console.error("Please check your Firebase configuration.");
-        }
-      }
-    };
-    testConnection();
+    if (!user) return;
 
     const unsubCustomers = onSnapshot(query(col('customers'), orderBy('createdAt', 'desc')), (snap) => {
       setCustomers(snap.docs.map(d => ({ id: d.id, ...d.data() } as Customer)));
@@ -4647,7 +4523,7 @@ export default function App() {
       unsubReleases();
       unsubSettings();
     };
-  }, [user, networkReady]);
+  }, [user]);
 
   // --- Handlers ---
   const handlePrint = useReactToPrint({
@@ -4963,10 +4839,6 @@ export default function App() {
                   setConfirmModal={setConfirmModal}
                   exportData={exportData}
                   importData={importData}
-                  autoSync={autoSync}
-                  setAutoSync={setAutoSync}
-                  manualUpload={manualUpload}
-                  manualDownload={manualDownload}
                 />
               )}
             </motion.div>
@@ -5019,87 +4891,6 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Sync Prompt Modal */}
-        <AnimatePresence>
-          {showSyncPrompt && (
-            <div className="fixed inset-0 z-[120] flex items-center justify-center p-6 bg-ink/40 backdrop-blur-sm">
-              <motion.div 
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="bg-card-white w-full max-w-md p-8 rounded-3xl card-shadow"
-              >
-                <div className="w-16 h-16 bg-primary-blue/10 rounded-full flex items-center justify-center mx-auto mb-6">
-                  <Database className="w-8 h-8 text-primary-blue" />
-                </div>
-                <h3 className="text-xl font-bold text-ink mb-4 text-center">選擇資料同步方式</h3>
-                <p className="text-ink/60 mb-6 leading-relaxed text-sm text-center">
-                  您想要如何開始使用系統？<br/>
-                  <span className="text-[10px] text-ink/40">開啟自動同步會使用 Firebase 額度，關閉則完全使用本地儲存。您可以隨時在設定中更改。</span>
-                </p>
-                
-                <div className="flex flex-col gap-3">
-                  <button 
-                    onClick={() => {
-                      setAutoSync(true);
-                      setShowSyncPrompt(false);
-                      localStorage.setItem('cuibo_gasha_autosync_prompted', 'true');
-                    }}
-                    className="w-full py-4 bg-primary-blue text-white rounded-2xl font-bold shadow-lg shadow-primary-blue/30"
-                  >
-                    開啟自動同步並下載雲端資料
-                  </button>
-                  <button 
-                    onClick={() => {
-                      setAutoSync(false);
-                      setShowSyncPrompt(false);
-                      localStorage.setItem('cuibo_gasha_autosync_prompted', 'true');
-                    }}
-                    className="w-full py-4 bg-background text-ink rounded-2xl font-bold hover:bg-ink/5"
-                  >
-                    僅使用本地資料 (省額度)
-                  </button>
-                </div>
-              </motion.div>
-            </div>
-          )}
-        </AnimatePresence>
-
-        {/* Quota Exceeded Modal */}
-        <AnimatePresence>
-          {quotaExceededError && (
-            <div className="fixed inset-0 z-[130] flex items-center justify-center p-6 bg-ink/40 backdrop-blur-sm">
-              <motion.div 
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.9 }}
-                className="bg-card-white w-full max-w-md p-8 rounded-3xl card-shadow border-2 border-orange-500/20"
-              >
-                <div className="w-16 h-16 bg-orange-500/10 rounded-full flex items-center justify-center mx-auto mb-6">
-                  <Database className="w-8 h-8 text-orange-500" />
-                </div>
-                <h3 className="text-xl font-bold text-ink mb-4 text-center">資料庫額度已達上限</h3>
-                <p className="text-ink/60 mb-6 leading-relaxed text-sm text-center">
-                  免費雲端額度已暫時用盡。您可以立即切換為<span className="font-bold text-orange-500">「本地離線模式」</span>繼續使用。
-                  <br/><br/>
-                  <span className="text-[11px] text-ink/40">切換後，您的資料會暫存在此設備中。明天額度恢復後，您再到設定開啟同步並強制上傳即可分享或備份至雲端。</span>
-                </p>
-                
-                <div className="flex flex-col gap-3">
-                  <button 
-                    onClick={() => {
-                      localStorage.setItem('cuibo_gasha_autosync', 'false');
-                      window.location.reload();
-                    }}
-                    className="w-full py-4 bg-orange-500 text-white rounded-2xl font-bold shadow-lg shadow-orange-500/30"
-                  >
-                    切換為本地模式並重新載入
-                  </button>
-                </div>
-              </motion.div>
-            </div>
-          )}
-        </AnimatePresence>
 
         {/* Confirmation Modal */}
         <AnimatePresence>
