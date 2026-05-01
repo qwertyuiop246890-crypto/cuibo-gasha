@@ -62,7 +62,7 @@ const handleFirestoreError = (error: unknown, operationType: OperationType, path
       emailVerified: auth.currentUser?.emailVerified,
       isAnonymous: auth.currentUser?.isAnonymous,
       tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
+      providerInfo: (auth.currentUser?.providerData || []).map(provider => ({
         providerId: provider.providerId,
         displayName: provider.displayName,
         email: provider.email,
@@ -177,6 +177,76 @@ const DEFAULT_PRICE_MAP: Record<number, number> = {
   1000: 360,
   1500: 450
 };
+
+const normalizeOrderItem = (item: any): OrderItem => {
+  const price = Number(item?.price) || 0;
+  const quantity = Number(item?.quantity) || 0;
+  return {
+    ...item,
+    id: item?.id || crypto.randomUUID(),
+    machineName: typeof item?.machineName === 'string' ? item.machineName : '',
+    price,
+    quantity,
+    subtotal: Number(item?.subtotal) || price * quantity,
+    createdAt: typeof item?.createdAt === 'string' ? item.createdAt : new Date().toISOString()
+  };
+};
+
+const normalizeCustomer = (id: string, data: any): Customer => ({
+  id,
+  ...data,
+  name: typeof data?.name === 'string' ? data.name : '',
+  totalSpent: Number(data?.totalSpent) || 0,
+  totalItems: Number(data?.totalItems) || 0,
+  createdAt: typeof data?.createdAt === 'string' ? data.createdAt : new Date().toISOString(),
+  lastOrderAt: typeof data?.lastOrderAt === 'string' ? data.lastOrderAt : new Date().toISOString()
+});
+
+const normalizeOrder = (id: string, data: any): Order => {
+  const items = Array.isArray(data?.items) ? data.items.map(normalizeOrderItem) : [];
+  return {
+    id,
+    ...data,
+    customerId: typeof data?.customerId === 'string' ? data.customerId : '',
+    customerName: typeof data?.customerName === 'string' ? data.customerName : '',
+    items,
+    totalAmount: Number(data?.totalAmount) || items.reduce((sum, item) => sum + item.subtotal, 0),
+    status: ['pending', 'completed', 'cancelled'].includes(data?.status) ? data.status : 'pending',
+    createdAt: typeof data?.createdAt === 'string' ? data.createdAt : new Date().toISOString(),
+    updatedAt: typeof data?.updatedAt === 'string' ? data.updatedAt : new Date().toISOString()
+  };
+};
+
+const normalizeMachine = (id: string, data: any) => ({
+  id,
+  ...data,
+  name: typeof data?.name === 'string' ? data.name : '',
+  defaultPrice: Number(data?.defaultPrice) || 0,
+  variants: Array.isArray(data?.variants) ? data.variants.filter((variant: any) => typeof variant === 'string') : [],
+  createdAt: typeof data?.createdAt === 'string' ? data.createdAt : new Date().toISOString(),
+  updatedAt: typeof data?.updatedAt === 'string' ? data.updatedAt : new Date().toISOString()
+});
+
+const normalizeRelease = (id: string, data: any) => ({
+  id,
+  ...data,
+  orderId: typeof data?.orderId === 'string' ? data.orderId : '',
+  itemId: typeof data?.itemId === 'string' ? data.itemId : '',
+  customerName: typeof data?.customerName === 'string' ? data.customerName : '',
+  machineName: typeof data?.machineName === 'string' ? data.machineName : '',
+  quantity: Number(data?.quantity) || 0,
+  price: Number(data?.price) || 0,
+  status: ['pending', 'completed', 'cancelled'].includes(data?.status) ? data.status : 'pending',
+  createdAt: typeof data?.createdAt === 'string' ? data.createdAt : new Date().toISOString()
+});
+
+const normalizeSettings = (id: string, data: any): SystemSettings => ({
+  id,
+  ...data,
+  notificationTemplate: typeof data?.notificationTemplate === 'string' ? data.notificationTemplate : DEFAULT_NOTIFICATION_TEMPLATE,
+  priceMap: data?.priceMap && typeof data.priceMap === 'object' && !Array.isArray(data.priceMap) ? data.priceMap : DEFAULT_PRICE_MAP,
+  lastBackupAt: typeof data?.lastBackupAt === 'string' ? data.lastBackupAt : new Date().toISOString()
+});
 
 // --- Components ---
 
@@ -1400,7 +1470,7 @@ const OrdersList = ({
                       onChange={(e) => setEditingItem({ ...editingItem, item: { ...editingItem.item, variant: e.target.value } })}
                     >
                       <option value="">選擇款式</option>
-                      {machines.find(m => m.name === editingItem.item.machineName).variants.map((v: string) => (
+                      {(machines.find(m => m.name === editingItem.item.machineName)?.variants || []).map((v: string) => (
                         <option key={v} value={v}>{v}</option>
                       ))}
                     </select>
@@ -2708,7 +2778,7 @@ const MachineManagement = ({
                       <p className="text-xs text-ink/40 mb-2">預設金額: ¥{config.defaultPrice}</p>
                       {viewMode !== 'grid-sm' && (
                         <div className="flex flex-wrap gap-1">
-                          {config.variants.map((v: string) => (
+                          {(config.variants || []).map((v: string) => (
                             <span key={v} className="px-2 py-1 bg-background rounded text-[10px] font-bold text-ink/60">{v}</span>
                           ))}
                         </div>
@@ -3344,7 +3414,7 @@ const CustomerDetailView = ({
                       onChange={(e) => setEditingItem({ ...editingItem, item: { ...editingItem.item, variant: e.target.value } })}
                     >
                       <option value="">選擇款式</option>
-                      {machines.find(m => m.name === editingItem.item.machineName).variants.map((v: string) => (
+                      {(machines.find(m => m.name === editingItem.item.machineName)?.variants || []).map((v: string) => (
                         <option key={v} value={v}>{v}</option>
                       ))}
                     </select>
@@ -4487,24 +4557,24 @@ export default function App() {
     if (!user) return;
 
     const unsubCustomers = onSnapshot(query(col('customers'), orderBy('createdAt', 'desc')), (snap) => {
-      setCustomers(snap.docs.map(d => ({ id: d.id, ...d.data() } as Customer)));
+      setCustomers(snap.docs.map(d => normalizeCustomer(d.id, d.data())));
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'customers'));
 
     const unsubOrders = onSnapshot(query(col('orders'), orderBy('createdAt', 'desc')), (snap) => {
-      setOrders(snap.docs.map(d => ({ id: d.id, ...d.data() } as Order)));
+      setOrders(snap.docs.map(d => normalizeOrder(d.id, d.data())));
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'orders'));
 
     const unsubMachines = onSnapshot(query(col('machines'), orderBy('name', 'asc')), (snap) => {
-      setMachines(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setMachines(snap.docs.map(d => normalizeMachine(d.id, d.data())));
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'machines'));
 
     const unsubReleases = onSnapshot(query(col('releases'), orderBy('createdAt', 'desc')), (snap) => {
-      setReleases(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setReleases(snap.docs.map(d => normalizeRelease(d.id, d.data())));
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'releases'));
 
     const unsubSettings = onSnapshot(dbDoc('settings', 'global'), (snap) => {
       if (snap.exists()) {
-        setSettings({ id: snap.id, ...snap.data() } as SystemSettings);
+        setSettings(normalizeSettings(snap.id, snap.data()));
       } else {
         // Initialize default settings
         const defaultSettings: Omit<SystemSettings, 'id'> = {
