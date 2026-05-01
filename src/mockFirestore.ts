@@ -181,20 +181,62 @@ export const waitForPendingWrites = async () => {};
 export const getDocFromServer = getDoc;
 
 export const writeBatch = (db: any) => {
-  const operations: Function[] = [];
+  const operations: Array<{
+    type: 'set' | 'update' | 'delete';
+    ref: any;
+    data?: any;
+    options?: any;
+  }> = [];
   return {
     set: (ref: any, data: any, options?: any) => {
-      operations.push(async () => await setDoc(ref, data, options));
+      operations.push({ type: 'set', ref, data, options });
     },
     update: (ref: any, data: any) => {
-      operations.push(async () => await updateDoc(ref, data));
+      operations.push({ type: 'update', ref, data });
     },
     delete: (ref: any) => {
-      operations.push(async () => await deleteDoc(ref));
+      operations.push({ type: 'delete', ref });
     },
     commit: async () => {
+      const changedPaths = new Set<string>();
+
       for (const op of operations) {
-        await op();
+        await loadCollection(op.ref.path);
+
+        if (op.type === 'set') {
+          if (op.options && op.options.merge) {
+            dbState[op.ref.path][op.ref.id] = {
+              ...dbState[op.ref.path][op.ref.id],
+              ...op.data
+            };
+          } else {
+            dbState[op.ref.path][op.ref.id] = op.data;
+          }
+        }
+
+        if (op.type === 'update') {
+          const resolvedData = { ...op.data };
+          for (const key in resolvedData) {
+            if (resolvedData[key]?._isIncrement) {
+              const current = dbState[op.ref.path]?.[op.ref.id]?.[key] || 0;
+              resolvedData[key] = current + resolvedData[key].val;
+            }
+          }
+          dbState[op.ref.path][op.ref.id] = {
+            ...dbState[op.ref.path][op.ref.id],
+            ...resolvedData
+          };
+        }
+
+        if (op.type === 'delete' && dbState[op.ref.path]?.[op.ref.id]) {
+          delete dbState[op.ref.path][op.ref.id];
+        }
+
+        changedPaths.add(op.ref.path);
+      }
+
+      for (const path of changedPaths) {
+        await saveCollection(path);
       }
     }
   };

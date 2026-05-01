@@ -4623,6 +4623,23 @@ export default function App() {
     reader.onload = async (event) => {
       try {
         const data = JSON.parse(event.target?.result as string);
+        const importCollections = [
+          { key: 'customers', path: 'customers' },
+          { key: 'orders', path: 'orders' },
+          { key: 'machines', path: 'machines' },
+          { key: 'releases', path: 'releases' },
+        ] as const;
+
+        for (const { key } of importCollections) {
+          if (data[key] && !Array.isArray(data[key])) {
+            throw new Error(`Invalid backup: ${key} must be an array`);
+          }
+
+          const invalidItem = data[key]?.find((item: any) => !item || typeof item.id !== 'string' || !item.id.trim());
+          if (invalidItem) {
+            throw new Error(`Invalid backup: ${key} contains an item without an id`);
+          }
+        }
         setConfirmModal({
           show: true,
           title: '還原資料',
@@ -4642,37 +4659,10 @@ export default function App() {
                 }
               };
 
-              if (data.customers) {
-                for (const c of data.customers) {
-                  const { id, ...rest } = c;
-                  currentBatch.set(dbDoc('customers', id), rest);
-                  operationCount++;
-                  await checkBatchLimit();
-                }
-              }
-              
-              if (data.orders) {
-                for (const o of data.orders) {
-                  const { id, ...rest } = o;
-                  currentBatch.set(dbDoc('orders', id), rest);
-                  operationCount++;
-                  await checkBatchLimit();
-                }
-              }
-
-              if (data.machines) {
-                for (const m of data.machines) {
-                  const { id, ...rest } = m;
-                  currentBatch.set(dbDoc('machines', id), rest);
-                  operationCount++;
-                  await checkBatchLimit();
-                }
-              }
-
-              if (data.releases) {
-                for (const r of data.releases) {
-                  const { id, ...rest } = r;
-                  currentBatch.set(dbDoc('releases', id), rest);
+              for (const { key, path } of importCollections) {
+                for (const item of data[key] || []) {
+                  const { id, ...rest } = item;
+                  currentBatch.set(dbDoc(path, id), rest);
                   operationCount++;
                   await checkBatchLimit();
                 }
