@@ -1928,10 +1928,11 @@ const CustomersList = ({
           </button>
           <button 
             onClick={handleSyncAllStats}
-            className="p-4 bg-card-white text-primary-blue rounded-2xl card-shadow flex-shrink-0 hover:bg-primary-blue/5 transition-colors"
+            className="px-4 py-3 bg-card-white text-primary-blue rounded-2xl card-shadow flex-shrink-0 hover:bg-primary-blue/5 transition-colors flex items-center gap-2"
             title="同步所有顧客數據"
           >
             <RefreshCw className="w-5 h-5" />
+            <span className="hidden sm:inline text-xs font-bold">同步顆數</span>
           </button>
           <div className="flex bg-card-white p-1 rounded-2xl card-shadow overflow-x-auto scroolbar-hide">
             <button 
@@ -3262,10 +3263,10 @@ const CustomerDetailView = ({
         });
       }
       
-      batch.set(dbDoc('customers', customer.id), {
+      batch.update(dbDoc('customers', customer.id), {
         totalSpent: increment(-transferSubtotal),
         totalItems: increment(-transferQuantity)
-      }, { merge: true });
+      });
 
       // 3. Add to target customer's pending order or create new
       const targetOrder = orders.find(o => o.customerId === targetId && o.status === 'pending');
@@ -3312,11 +3313,11 @@ const CustomerDetailView = ({
           lastOrderAt: now
         });
       } else {
-        batch.set(dbDoc('customers', targetId!), {
+        batch.update(dbDoc('customers', targetId!), {
           totalSpent: increment(transferSubtotal),
           totalItems: increment(transferQuantity),
           lastOrderAt: now
-        }, { merge: true });
+        });
       }
 
       setTransferringItem(null);
@@ -3562,16 +3563,16 @@ const CustomerDetailView = ({
         totalAmount: nextTargetTotal,
         updatedAt: now
       });
-      batch.set(dbDoc('customers', customer.id), {
+      batch.update(dbDoc('customers', customer.id), {
         totalSpent: increment(targetSubtotal - sourceSubtotal),
         totalItems: increment(targetQuantity - sourceQuantity),
         lastOrderAt: now
-      }, { merge: true });
-      batch.set(dbDoc('customers', targetCustomer.id), {
+      });
+      batch.update(dbDoc('customers', targetCustomer.id), {
         totalSpent: increment(sourceSubtotal - targetSubtotal),
         totalItems: increment(sourceQuantity - targetQuantity),
         lastOrderAt: now
-      }, { merge: true });
+      });
       await batch.commit();
       setExchangingItem(null);
       setExchangeTargetCustomerName('');
@@ -4579,10 +4580,10 @@ const Dashboard = ({
             totalAmount: newTotal,
             updatedAt: now
           });
-          batch.set(dbDoc('customers', orderData.customerId), {
+          batch.update(dbDoc('customers', orderData.customerId), {
             totalSpent: increment(-orderTransferSubtotal),
             totalItems: increment(-orderTransferQuantity)
-          }, { merge: true });
+          });
           totalTransferQuantity += orderTransferQuantity;
           totalTransferSubtotal += orderTransferSubtotal;
         }
@@ -4632,11 +4633,11 @@ const Dashboard = ({
             lastOrderAt: now
           });
         } else {
-          batch.set(dbDoc('customers', targetId!), {
+          batch.update(dbDoc('customers', targetId!), {
             totalSpent: increment(totalTransferSubtotal),
             totalItems: increment(totalTransferQuantity),
             lastOrderAt: now
-          }, { merge: true });
+          });
         }
       } else {
         showToast('原顧客帳上已沒有可轉讓數量', 'error');
@@ -5867,5 +5868,6 @@ export default function App() {
     </ErrorBoundary>
   );
 }
+
 
 

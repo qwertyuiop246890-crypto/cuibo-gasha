@@ -109,6 +109,17 @@ async function saveCollection(path: string) {
   notifyListeners(path);
 }
 
+function resolveIncrementFields(path: string, id: string, data: any) {
+  const resolvedData = { ...data };
+  for (const key in resolvedData) {
+    if (resolvedData[key]?._isIncrement) {
+      const current = dbState[path]?.[id]?.[key] || 0;
+      resolvedData[key] = current + resolvedData[key].val;
+    }
+  }
+  return resolvedData;
+}
+
 function notifyListeners(path: string) {
   // Collection listeners
   if (listeners[path]) {
@@ -201,24 +212,18 @@ export const onSnapshot = (ref: any, onNext: Function, onError?: Function) => {
 
 export const setDoc = async (ref: any, data: any, options?: any) => {
   await loadCollection(ref.path);
+  const resolvedData = resolveIncrementFields(ref.path, ref.id, data);
   if (options && options.merge) {
-    dbState[ref.path][ref.id] = sanitizeDoc(ref.path, { ...dbState[ref.path][ref.id], ...data });
+    dbState[ref.path][ref.id] = sanitizeDoc(ref.path, { ...dbState[ref.path][ref.id], ...resolvedData });
   } else {
-    dbState[ref.path][ref.id] = sanitizeDoc(ref.path, data);
+    dbState[ref.path][ref.id] = sanitizeDoc(ref.path, resolvedData);
   }
   await saveCollection(ref.path);
 };
 
 export const updateDoc = async (ref: any, data: any) => {
   await loadCollection(ref.path);
-  // increment resolution
-  const resolvedData = { ...data };
-  for (const key in resolvedData) {
-    if (resolvedData[key]?._isIncrement) {
-      const current = dbState[ref.path]?.[ref.id]?.[key] || 0;
-      resolvedData[key] = current + resolvedData[key].val;
-    }
-  }
+  const resolvedData = resolveIncrementFields(ref.path, ref.id, data);
   dbState[ref.path][ref.id] = sanitizeDoc(ref.path, { ...dbState[ref.path][ref.id], ...resolvedData });
   await saveCollection(ref.path);
 };
@@ -299,24 +304,19 @@ export const writeBatch = (db: any) => {
         await loadCollection(op.ref.path);
 
         if (op.type === 'set') {
+          const resolvedData = resolveIncrementFields(op.ref.path, op.ref.id, op.data);
           if (op.options && op.options.merge) {
             dbState[op.ref.path][op.ref.id] = sanitizeDoc(op.ref.path, {
               ...dbState[op.ref.path][op.ref.id],
-              ...op.data
+              ...resolvedData
             });
           } else {
-            dbState[op.ref.path][op.ref.id] = sanitizeDoc(op.ref.path, op.data);
+            dbState[op.ref.path][op.ref.id] = sanitizeDoc(op.ref.path, resolvedData);
           }
         }
 
         if (op.type === 'update') {
-          const resolvedData = { ...op.data };
-          for (const key in resolvedData) {
-            if (resolvedData[key]?._isIncrement) {
-              const current = dbState[op.ref.path]?.[op.ref.id]?.[key] || 0;
-              resolvedData[key] = current + resolvedData[key].val;
-            }
-          }
+          const resolvedData = resolveIncrementFields(op.ref.path, op.ref.id, op.data);
           dbState[op.ref.path][op.ref.id] = sanitizeDoc(op.ref.path, {
             ...dbState[op.ref.path][op.ref.id],
             ...resolvedData
