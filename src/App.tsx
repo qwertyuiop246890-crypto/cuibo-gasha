@@ -3213,17 +3213,11 @@ const CustomerDetailView = ({
       // 1. Find or create target customer
       let targetCust = customers.find(c => c.name.replace(/\s+/g, '') === trimmedTarget);
       let targetId = targetCust?.id;
+      let createdTargetCustomerRef: any = null;
 
       if (!targetCust) {
         const newCustRef = dbDoc('customers');
-        const newCust = {
-          name: trimmedTarget,
-          totalSpent: 0,
-          totalItems: 0,
-          createdAt: now,
-          lastOrderAt: now
-        };
-        batch.set(newCustRef, newCust);
+        createdTargetCustomerRef = newCustRef;
         targetId = newCustRef.id;
       }
 
@@ -3309,11 +3303,21 @@ const CustomerDetailView = ({
           updatedAt: now
         });
       }
-      batch.set(dbDoc('customers', targetId!), {
-        totalSpent: increment(transferSubtotal),
-        totalItems: increment(transferQuantity),
-        lastOrderAt: now
-      }, { merge: true });
+      if (createdTargetCustomerRef) {
+        batch.set(createdTargetCustomerRef, {
+          name: trimmedTarget,
+          totalSpent: transferSubtotal,
+          totalItems: transferQuantity,
+          createdAt: now,
+          lastOrderAt: now
+        });
+      } else {
+        batch.set(dbDoc('customers', targetId!), {
+          totalSpent: increment(transferSubtotal),
+          totalItems: increment(transferQuantity),
+          lastOrderAt: now
+        }, { merge: true });
+      }
 
       setTransferringItem(null);
       setTargetCustomerName('');
@@ -3339,7 +3343,23 @@ const CustomerDetailView = ({
       const existing = releases.find(r => r.orderId === orderId && rawIds.includes(r.itemId) && r.status === 'pending');
       if (existing) {
         showToast('已取消釋出');
-        await deleteDoc(dbDoc('releases', existing.id));
+        const order = orders.find(o => o.id === orderId);
+        if (order) {
+          const batch = writeBatch(db);
+          const now = new Date().toISOString();
+          const updatedItems = order.items.map(orderItem => rawIds.includes(orderItem.id)
+            ? { ...orderItem, isReleased: false, releaseQuantity: 0, releaseAt: undefined, updatedAt: now }
+            : orderItem
+          );
+          batch.delete(dbDoc('releases', existing.id));
+          batch.update(dbDoc('orders', orderId), {
+            items: updatedItems,
+            updatedAt: now
+          });
+          await batch.commit();
+        } else {
+          await deleteDoc(dbDoc('releases', existing.id));
+        }
       } else {
         setReleasingItem({ orderId, item: { ...item, id: rawIds[0] } });
         setReleaseQuantity(item.quantity);
@@ -3377,7 +3397,7 @@ const CustomerDetailView = ({
       const order = orders.find(o => o.id === orderId);
       if (order) {
         const updatedItems = order.items.map(orderItem => rawIds.includes(orderItem.id)
-          ? { ...orderItem, releaseAt: now, updatedAt: now }
+          ? { ...orderItem, isReleased: true, releaseQuantity: confirmedReleaseQuantity, releaseAt: now, updatedAt: now }
           : orderItem
         );
         const batch = writeBatch(db);
@@ -3969,7 +3989,7 @@ const CustomerDetailView = ({
                   {!exchangeTargetCustomerName ? (
                     <p className="text-sm text-ink/30 bg-background rounded-2xl p-4">請先選擇交換對象。</p>
                   ) : !exchangeTargetCustomer ? (
-                    <p className="text-sm text-red-400 bg-red-50 rounded-2xl p-4">找不到這位顧客。</p>
+                    <p className="text-sm text-red-400 bg-red-50 rounded-2xl p-4">交換需要選擇已有扭蛋的顧客；若只是要轉給新顧客，請使用「轉讓」。</p>
                   ) : exchangeTargetItems.length === 0 ? (
                     <p className="text-sm text-ink/30 bg-background rounded-2xl p-4">這位顧客目前沒有可交換的扭蛋。</p>
                   ) : (
@@ -4064,6 +4084,9 @@ const CustomerDetailView = ({
             >
               <h3 className="text-lg font-bold text-ink mb-4">釋出項目</h3>
               <p className="text-sm text-ink/60 mb-4">釋出 {releasingItem.item.machineName} {releasingItem.item.variant && `(${releasingItem.item.variant})`}</p>
+              <p className="text-xs text-ink/40 mb-4 bg-background rounded-2xl p-3">
+                釋出只會放進釋出池，成功轉讓給其他顧客前，數量與金額仍保留在原顧客帳上。
+              </p>
               
               <div className="mb-4">
                 <label className="text-xs font-bold text-ink/40 block mb-2">釋出數量</label>
@@ -4441,17 +4464,11 @@ const Dashboard = ({
       // 1. Find or create target customer
       let targetCust = customers.find(c => c.name.replace(/\s+/g, '') === trimmedTarget);
       let targetId = targetCust?.id;
+      let createdTargetCustomerRef: any = null;
 
       if (!targetCust) {
         const newCustRef = dbDoc('customers');
-        const newCust = {
-          name: trimmedTarget,
-          totalSpent: 0,
-          totalItems: 0,
-          createdAt: now,
-          lastOrderAt: now
-        };
-        batch.set(newCustRef, newCust);
+        createdTargetCustomerRef = newCustRef;
         targetId = newCustRef.id;
       }
 
@@ -4476,10 +4493,14 @@ const Dashboard = ({
         const oldQty = oldItems.reduce((sum, i) => sum + i.quantity, 0);
         const oldSubtotal = oldItems.reduce((sum, i) => sum + i.subtotal, 0);
 
-        const transferQuantity = release.quantity;
+        const transferQuantity = Math.max(0, Math.min(Number(release.quantity) || 0, oldQty));
         const transferSubtotal = transferQuantity * release.price;
+        if (oldItems.length === 0 || transferQuantity < 1) {
+          showToast('原顧客帳上已沒有可轉讓數量', 'error');
+          return;
+        }
         
-        if (oldItems.length > 0) {
+        if (oldItems.length > 0 && transferQuantity > 0) {
           itemToTransfer = {
             id: rawIds[0],
             machineName: release.machineName,
@@ -4493,32 +4514,28 @@ const Dashboard = ({
           };
 
           let newItems = orderData.items.filter(i => !rawIds.includes(i.id));
-
-          if (transferQuantity < oldQty) {
-            const remainingItem = {
-              ...oldItems[0],
-              id: rawIds[0],
-              quantity: oldQty - transferQuantity,
-              subtotal: oldSubtotal - transferSubtotal,
-              updatedAt: now,
-              transferAt: now
-            };
-            // @ts-ignore
-            delete remainingItem.rawIds;
-            newItems.push(remainingItem);
-          }
+          const remainingQuantity = Math.max(0, oldQty - transferQuantity);
+          const remainingItem = {
+            ...oldItems[0],
+            id: rawIds[0],
+            quantity: remainingQuantity,
+            subtotal: Math.max(0, oldSubtotal - transferSubtotal),
+            isReleased: false,
+            releaseQuantity: 0,
+            releaseAt: undefined,
+            updatedAt: now,
+            transferAt: now
+          };
+          // @ts-ignore
+          delete remainingItem.rawIds;
+          newItems.push(remainingItem);
           
           const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
-          
-          if (newItems.length === 0) {
-            batch.delete(orderRef);
-          } else {
-            batch.update(orderRef, {
-              items: newItems,
-              totalAmount: newTotal,
-              updatedAt: now
-            });
-          }
+          batch.update(orderRef, {
+            items: newItems,
+            totalAmount: newTotal,
+            updatedAt: now
+          });
 
           // Update original customer's totalSpent and totalItems
           batch.set(dbDoc('customers', orderData.customerId), {
@@ -4558,11 +4575,21 @@ const Dashboard = ({
             updatedAt: now
           });
         }
-        batch.set(dbDoc('customers', targetId!), {
-          totalSpent: increment(transferredItem.subtotal),
-          totalItems: increment(transferredItem.quantity),
-          lastOrderAt: now
-        }, { merge: true });
+        if (createdTargetCustomerRef) {
+          batch.set(createdTargetCustomerRef, {
+            name: trimmedTarget,
+            totalSpent: transferredItem.subtotal,
+            totalItems: transferredItem.quantity,
+            createdAt: now,
+            lastOrderAt: now
+          });
+        } else {
+          batch.set(dbDoc('customers', targetId!), {
+            totalSpent: increment(transferredItem.subtotal),
+            totalItems: increment(transferredItem.quantity),
+            lastOrderAt: now
+          }, { merge: true });
+        }
       }
 
       showToast('釋出轉移成功！');
@@ -4674,7 +4701,7 @@ const Dashboard = ({
                   <button 
                     onClick={() => setTransferringRelease(r)}
                     className="p-2 bg-primary-blue text-white rounded-xl shadow-sm opacity-0 group-hover:opacity-100 transition-all"
-                    title="轉讓給顧客"
+                    title="成交轉讓給顧客"
                   >
                     <ArrowRightLeft className="w-4 h-4" />
                   </button>
@@ -4720,7 +4747,7 @@ const Dashboard = ({
               initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
               className="bg-card-white w-full max-w-md p-6 rounded-t-3xl sm:rounded-3xl shadow-2xl"
             >
-              <h3 className="text-lg font-bold text-ink mb-4">轉讓釋出扭蛋</h3>
+              <h3 className="text-lg font-bold text-ink mb-4">成交轉讓釋出扭蛋</h3>
               <p className="text-sm text-ink/60 mb-4">將 {transferringRelease.machineName} 轉讓給：</p>
               <SuggestiveInput 
                 value={targetCustomerName}
