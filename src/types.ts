@@ -21,6 +21,12 @@ export interface OrderItem {
   isReleased?: boolean;
   releaseQuantity?: number;
   createdAt: string;
+  callTime?: string;
+  releaseAt?: string;
+  transferAt?: string;
+  exchangeAt?: string;
+  sourceCustomerId?: string;
+  sourceCustomerName?: string;
   updatedAt?: string;
   isChecked?: boolean;
 }
@@ -46,6 +52,10 @@ export interface Release {
   price: number;
   status: 'pending' | 'completed' | 'cancelled';
   createdAt: string;
+  releaseAt?: string;
+  transferredAt?: string;
+  transferTargetCustomerId?: string;
+  transferTargetCustomerName?: string;
 }
 
 export interface Order {

@@ -37,7 +37,17 @@ function sanitizeDoc(path: string, data: any) {
         price,
         quantity,
         subtotal: Number(item?.subtotal) || price * quantity,
-        createdAt: typeof item?.createdAt === 'string' ? item.createdAt : now
+        createdAt: typeof item?.createdAt === 'string' ? item.createdAt : now,
+        updatedAt: typeof item?.updatedAt === 'string' ? item.updatedAt : undefined,
+        callTime: typeof item?.callTime === 'string' ? item.callTime : undefined,
+        releaseAt: typeof item?.releaseAt === 'string' ? item.releaseAt : undefined,
+        transferAt: typeof item?.transferAt === 'string' ? item.transferAt : undefined,
+        exchangeAt: typeof item?.exchangeAt === 'string' ? item.exchangeAt : undefined,
+        sourceCustomerId: typeof item?.sourceCustomerId === 'string' ? item.sourceCustomerId : undefined,
+        sourceCustomerName: typeof item?.sourceCustomerName === 'string' ? item.sourceCustomerName : undefined,
+        isReleased: Boolean(item?.isReleased),
+        releaseQuantity: Number(item?.releaseQuantity) || 0,
+        isChecked: Boolean(item?.isChecked)
       };
     }) : [];
     next.totalAmount = Number(next.totalAmount) || next.items.reduce((sum: number, item: any) => sum + (Number(item.subtotal) || 0), 0);
@@ -63,6 +73,11 @@ function sanitizeDoc(path: string, data: any) {
     next.price = Number(next.price) || 0;
     next.status = ['pending', 'completed', 'cancelled'].includes(next.status) ? next.status : 'pending';
     next.createdAt = typeof next.createdAt === 'string' ? next.createdAt : now;
+    next.releaseAt = typeof next.releaseAt === 'string' ? next.releaseAt : next.createdAt;
+    next.transferredAt = typeof next.transferredAt === 'string' ? next.transferredAt : undefined;
+    next.transferTargetCustomerId = typeof next.transferTargetCustomerId === 'string' ? next.transferTargetCustomerId : undefined;
+    next.transferTargetCustomerName = typeof next.transferTargetCustomerName === 'string' ? next.transferTargetCustomerName : undefined;
+    next.rawIds = Array.isArray(next.rawIds) ? next.rawIds.filter((id: any) => typeof id === 'string') : undefined;
   }
 
   if (name === 'settings') {

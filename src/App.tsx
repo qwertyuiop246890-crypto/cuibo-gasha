@@ -178,6 +178,34 @@ const DEFAULT_PRICE_MAP: Record<number, number> = {
   1500: 450
 };
 
+type TimelineFilterType = 'createdAt' | 'callTime' | 'updatedAt' | 'releaseAt' | 'transferAt' | 'exchangeAt';
+
+const optionalIsoString = (value: any) => typeof value === 'string' && value ? value : undefined;
+
+const getItemTimelineValue = (item: OrderItem, order: Pick<Order, 'createdAt' | 'updatedAt'>, type: TimelineFilterType) => {
+  if (type === 'createdAt') return order.createdAt || item.createdAt;
+  if (type === 'callTime') return item.callTime || item.createdAt || order.createdAt;
+  if (type === 'updatedAt') return item.updatedAt || order.updatedAt || item.createdAt || order.createdAt;
+  if (type === 'releaseAt') return item.releaseAt;
+  if (type === 'transferAt') return item.transferAt;
+  if (type === 'exchangeAt') return item.exchangeAt;
+  return item.createdAt || order.createdAt;
+};
+
+const toDateTimeInputValue = (value?: string) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (num: number) => String(num).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
+const fromDateTimeInputValue = (value: string, fallback: string) => {
+  if (!value) return fallback;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
+};
+
 const normalizeOrderItem = (item: any): OrderItem => {
   const price = Number(item?.price) || 0;
   const quantity = Number(item?.quantity) || 0;
@@ -188,7 +216,14 @@ const normalizeOrderItem = (item: any): OrderItem => {
     price,
     quantity,
     subtotal: Number(item?.subtotal) || price * quantity,
-    createdAt: typeof item?.createdAt === 'string' ? item.createdAt : new Date().toISOString()
+    createdAt: typeof item?.createdAt === 'string' ? item.createdAt : new Date().toISOString(),
+    callTime: optionalIsoString(item?.callTime),
+    releaseAt: optionalIsoString(item?.releaseAt),
+    transferAt: optionalIsoString(item?.transferAt),
+    exchangeAt: optionalIsoString(item?.exchangeAt),
+    sourceCustomerId: optionalIsoString(item?.sourceCustomerId),
+    sourceCustomerName: optionalIsoString(item?.sourceCustomerName),
+    updatedAt: optionalIsoString(item?.updatedAt)
   };
 };
 
@@ -237,7 +272,11 @@ const normalizeRelease = (id: string, data: any) => ({
   quantity: Number(data?.quantity) || 0,
   price: Number(data?.price) || 0,
   status: ['pending', 'completed', 'cancelled'].includes(data?.status) ? data.status : 'pending',
-  createdAt: typeof data?.createdAt === 'string' ? data.createdAt : new Date().toISOString()
+  createdAt: typeof data?.createdAt === 'string' ? data.createdAt : new Date().toISOString(),
+  releaseAt: optionalIsoString(data?.releaseAt),
+  transferredAt: optionalIsoString(data?.transferredAt),
+  transferTargetCustomerId: optionalIsoString(data?.transferTargetCustomerId),
+  transferTargetCustomerName: optionalIsoString(data?.transferTargetCustomerName)
 });
 
 const normalizeSettings = (id: string, data: any): SystemSettings => ({
@@ -306,6 +345,12 @@ const prepareImportPayload = (raw: any, fileName: string, fileSize: number): Pre
       isReleased: Boolean(item?.isReleased),
       releaseQuantity: Number(item?.releaseQuantity) || 0,
       createdAt: typeof item?.createdAt === 'string' ? item.createdAt : importedAt,
+      callTime: optionalIsoString(item?.callTime),
+      releaseAt: optionalIsoString(item?.releaseAt),
+      transferAt: optionalIsoString(item?.transferAt),
+      exchangeAt: optionalIsoString(item?.exchangeAt),
+      sourceCustomerId: optionalIsoString(item?.sourceCustomerId),
+      sourceCustomerName: optionalIsoString(item?.sourceCustomerName),
       updatedAt: typeof item?.updatedAt === 'string' ? item.updatedAt : importedAt,
       isChecked: Boolean(item?.isChecked)
     };
@@ -562,6 +607,7 @@ const CreateOrder = ({
   const [machineName, setMachineName] = useState('');
   const [price, setPrice] = useState<number>(100);
   const [orderItems, setOrderItems] = useState([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
+  const [callTime, setCallTime] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
   const [isFullscreenImage, setIsFullscreenImage] = useState(false);
@@ -925,6 +971,7 @@ const CreateOrder = ({
     }
     
     const now = new Date().toISOString();
+    const orderCallTime = fromDateTimeInputValue(callTime, now);
     
     try {
       let customerId: string | undefined;
@@ -975,6 +1022,7 @@ const CreateOrder = ({
           variant: finalVariant,
           subtotal,
           createdAt: now,
+          callTime: orderCallTime,
           isChecked: false
         });
       }
@@ -1056,6 +1104,7 @@ const CreateOrder = ({
         setMachineName('');
         setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
         setUploadedImage(null);
+        setCallTime('');
       } else if (mode === 'same_item') {
         // Keep items, clear customer
         setCustomerName('');
@@ -1067,6 +1116,7 @@ const CreateOrder = ({
         setMachineName('');
         setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
         setUploadedImage(null);
+        setCallTime('');
         setActiveTab('create');
       }
     } catch (err: any) {
@@ -1104,6 +1154,16 @@ const CreateOrder = ({
           placeholder="輸入或選擇顧客名稱..."
           suggestions={customerSuggestions}
         />
+        <div className="mt-4">
+          <label className="text-xs font-bold text-ink/40 block mb-2">喊單時間（選填）</label>
+          <input
+            type="datetime-local"
+            value={callTime}
+            onChange={(e) => setCallTime(e.target.value)}
+            className="w-full px-4 py-3 bg-background rounded-xl border-none text-ink outline-none focus:ring-2 focus:ring-primary-blue"
+          />
+          <p className="text-[10px] text-ink/30 mt-2">不填會使用建立訂單當下時間。</p>
+        </div>
       </div>
 
       <div className="bg-card-white p-6 rounded-3xl card-shadow">
@@ -1328,7 +1388,7 @@ const OrdersList = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
   const [dateFilter, setDateFilter] = useState('');
-  const [dateFilterType, setDateFilterType] = useState<'createdAt' | 'updatedAt'>('createdAt');
+  const [dateFilterType, setDateFilterType] = useState<TimelineFilterType>('createdAt');
   const [editingItem, setEditingItem] = useState<{ orderId: string, item: OrderItem } | null>(null);
 
   const handleUpdateItem = async (orderId: string, updatedItem: OrderItem) => {
@@ -1399,12 +1459,16 @@ const OrdersList = ({
       orderId: order.id,
       customerName: order.customerName,
       customerId: order.customerId,
-      orderTime: dateFilterType === 'createdAt' ? (item.createdAt || order.createdAt || new Date().toISOString()) : (item.updatedAt || item.createdAt || order.createdAt || new Date().toISOString())
+      orderCreatedAt: order.createdAt,
+      orderUpdatedAt: order.updatedAt,
+      orderTime: getItemTimelineValue(item, order, dateFilterType)
     }))
   );
 
   const filteredItems = flattenedItems.filter(item => {
     const lowerSearch = searchTerm.toLowerCase();
+    const requiresOperationTime = ['releaseAt', 'transferAt', 'exchangeAt'].includes(dateFilterType);
+    if (requiresOperationTime && !item.orderTime) return false;
     const itemDate = item.orderTime ? format(toZonedTime(new Date(item.orderTime), TAIWAN_TZ), 'yyyy-MM-dd') : '';
     
     return (item.customerName.toLowerCase().includes(lowerSearch) ||
@@ -1415,8 +1479,8 @@ const OrdersList = ({
 
   // Sort by orderTime based on sortOrder
   const sortedItems = filteredItems.sort((a, b) => {
-    const timeA = new Date(a.orderTime).getTime();
-    const timeB = new Date(b.orderTime).getTime();
+    const timeA = a.orderTime ? new Date(a.orderTime).getTime() : 0;
+    const timeB = b.orderTime ? new Date(b.orderTime).getTime() : 0;
     return sortOrder === 'desc' ? timeB - timeA : timeA - timeB;
   });
 
@@ -1436,11 +1500,15 @@ const OrdersList = ({
         <div className="flex flex-row flex-wrap gap-4">
           <select
             value={dateFilterType}
-            onChange={(e) => setDateFilterType(e.target.value as 'createdAt' | 'updatedAt')}
+            onChange={(e) => setDateFilterType(e.target.value as TimelineFilterType)}
             className="px-4 py-3 bg-background rounded-xl border-none text-ink cursor-pointer outline-none focus:ring-2 focus:ring-primary-blue"
           >
-            <option value="createdAt">依照建立日期</option>
-            <option value="updatedAt">依照編輯日期</option>
+            <option value="createdAt">依訂單建立時間</option>
+            <option value="callTime">依喊單時間</option>
+            <option value="updatedAt">依編輯時間</option>
+            <option value="releaseAt">依釋出時間</option>
+            <option value="transferAt">依轉讓時間</option>
+            <option value="exchangeAt">依交換時間</option>
           </select>
           <input 
             type="date" 
@@ -1545,9 +1613,11 @@ const OrdersList = ({
                     </span>
                   </div>
                   <div className="flex flex-col items-end gap-1">
-                    <span className="text-xs text-ink/40 tracking-tight">
-                      {format(toZonedTime(new Date(item.orderTime), TAIWAN_TZ), 'yyyy/MM/dd HH:mm')}
-                    </span>
+                    <span className="text-xs text-ink/40 tracking-tight">建立：{formatDateTime(item.orderCreatedAt)}</span>
+                    <span className="text-xs text-ink/40 tracking-tight">喊單：{formatDateTime(item.callTime || item.createdAt)}</span>
+                    {item.releaseAt && <span className="text-[10px] text-orange-500 tracking-tight">釋出：{formatDateTime(item.releaseAt)}</span>}
+                    {item.transferAt && <span className="text-[10px] text-primary-blue tracking-tight">轉讓：{formatDateTime(item.transferAt)}</span>}
+                    {item.exchangeAt && <span className="text-[10px] text-green-600 tracking-tight">交換：{formatDateTime(item.exchangeAt)}</span>}
                     <button 
                       onClick={() => setEditingItem({ orderId: item.orderId, item })}
                       className="p-1.5 text-primary-blue hover:text-white hover:bg-primary-blue rounded-lg transition-all"
@@ -1619,6 +1689,21 @@ const OrdersList = ({
                       }}
                     />
                   </div>
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-ink/40 block mb-1">喊單時間</label>
+                  <input
+                    type="datetime-local"
+                    className="w-full p-4 bg-background rounded-2xl border-none"
+                    value={toDateTimeInputValue(editingItem.item.callTime || editingItem.item.createdAt)}
+                    onChange={(e) => setEditingItem({
+                      ...editingItem,
+                      item: {
+                        ...editingItem.item,
+                        callTime: fromDateTimeInputValue(e.target.value, editingItem.item.createdAt || new Date().toISOString())
+                      }
+                    })}
+                  />
                 </div>
                 <div className="flex gap-2 pt-4">
                   <button onClick={() => setEditingItem(null)} className="flex-1 py-4 bg-background text-ink rounded-2xl font-bold">取消</button>
@@ -2939,6 +3024,9 @@ const CustomerDetailView = ({
   const [transferringItem, setTransferringItem] = useState<{ orderId: string, item: OrderItem } | null>(null);
   const [transferQuantity, setTransferQuantity] = useState(1);
   const [targetCustomerName, setTargetCustomerName] = useState('');
+  const [exchangingItem, setExchangingItem] = useState<{ orderId: string, item: OrderItem & { rawIds?: string[] } } | null>(null);
+  const [exchangeTargetCustomerName, setExchangeTargetCustomerName] = useState('');
+  const [selectedExchangeItem, setSelectedExchangeItem] = useState<{ orderId: string, item: OrderItem & { rawIds?: string[] } } | null>(null);
   const [releasingItem, setReleasingItem] = useState<{ orderId: string, item: OrderItem } | null>(null);
   const [releaseQuantity, setReleaseQuantity] = useState(1);
   const [isEditingName, setIsEditingName] = useState(false);
@@ -3071,6 +3159,7 @@ const CustomerDetailView = ({
 
     try {
       const batch = writeBatch(db);
+      const now = new Date().toISOString();
 
       // 1. Find or create target customer
       let targetCust = customers.find(c => c.name.replace(/\s+/g, '') === trimmedTarget);
@@ -3082,8 +3171,8 @@ const CustomerDetailView = ({
           name: trimmedTarget,
           totalSpent: 0,
           totalItems: 0,
-          createdAt: new Date().toISOString(),
-          lastOrderAt: new Date().toISOString()
+          createdAt: now,
+          lastOrderAt: now
         };
         batch.set(newCustRef, newCust);
         targetId = newCustRef.id;
@@ -3109,7 +3198,9 @@ const CustomerDetailView = ({
           ...oldItems[0],
           id: rawIds[0],
           quantity: oldQty - transferQuantity,
-          subtotal: oldSubtotal - transferSubtotal
+          subtotal: oldSubtotal - transferSubtotal,
+          updatedAt: now,
+          transferAt: now
         };
         // @ts-ignore
         delete remainingItem.rawIds;
@@ -3124,7 +3215,7 @@ const CustomerDetailView = ({
         batch.update(dbDoc('orders', orderId), {
           items: newItems,
           totalAmount: newTotal,
-          updatedAt: new Date().toISOString()
+          updatedAt: now
         });
       }
       
@@ -3135,7 +3226,6 @@ const CustomerDetailView = ({
 
       // 3. Add to target customer's pending order or create new
       const targetOrder = orders.find(o => o.customerId === targetId && o.status === 'pending');
-      const now = new Date().toISOString();
       const safeTransferredItem = {
         id: crypto.randomUUID(),
         machineName: item.machineName,
@@ -3143,6 +3233,10 @@ const CustomerDetailView = ({
         quantity: transferQuantity,
         subtotal: transferSubtotal,
         createdAt: now,
+        callTime: item.callTime || item.createdAt || now,
+        transferAt: now,
+        sourceCustomerId: customer.id,
+        sourceCustomerName: customer.name,
         ...(item.variant ? { variant: item.variant } : {}),
         ...(item.machineId ? { machineId: item.machineId } : {})
       };
@@ -3169,7 +3263,7 @@ const CustomerDetailView = ({
       batch.set(dbDoc('customers', targetId!), {
         totalSpent: increment(transferSubtotal),
         totalItems: increment(transferQuantity),
-        lastOrderAt: new Date().toISOString()
+        lastOrderAt: now
       }, { merge: true });
 
       setTransferringItem(null);
@@ -3210,24 +3304,42 @@ const CustomerDetailView = ({
     if (!releasingItem || releaseQuantity < 1) return;
     const { orderId, item } = releasingItem;
     try {
+      const now = new Date().toISOString();
       const releaseRef = dbDoc('releases');
+      const rawIds = (item as any).rawIds || [item.id];
       const releaseData: any = {
         orderId,
         itemId: item.id,
-        rawIds: (item as any).rawIds || [item.id],
+        rawIds,
         customerName: customer.name,
         machineName: item.machineName,
         quantity: releaseQuantity,
         price: item.price,
         status: 'pending',
-        createdAt: new Date().toISOString()
+        createdAt: now,
+        releaseAt: now
       };
       if (item.variant) {
         releaseData.variant = item.variant;
       }
       showToast('正在釋出中');
       setReleasingItem(null);
-      await setDoc(releaseRef, releaseData);
+      const order = orders.find(o => o.id === orderId);
+      if (order) {
+        const updatedItems = order.items.map(orderItem => rawIds.includes(orderItem.id)
+          ? { ...orderItem, releaseAt: now, updatedAt: now }
+          : orderItem
+        );
+        const batch = writeBatch(db);
+        batch.set(releaseRef, releaseData);
+        batch.update(dbDoc('orders', orderId), {
+          items: updatedItems,
+          updatedAt: now
+        });
+        await batch.commit();
+      } else {
+        await setDoc(releaseRef, releaseData);
+      }
     } catch (err: any) {
       if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
         showToast('釋出失敗：資料庫免費額度已滿', 'error');
@@ -3284,6 +3396,122 @@ const CustomerDetailView = ({
     });
 
     return grouped;
+  };
+
+  const exchangeTargetCustomer = customers.find(c => c.name.replace(/\s+/g, '') === exchangeTargetCustomerName.replace(/\s+/g, ''));
+  const exchangeTargetItems = exchangeTargetCustomer
+    ? orders
+        .filter(o => o.customerId === exchangeTargetCustomer.id && o.status === 'pending')
+        .flatMap(order => groupOrderItems(order).map(item => ({ orderId: order.id, item })))
+        .filter(({ item }) => item.quantity > 0)
+    : [];
+
+  const handleExchange = async () => {
+    if (!exchangingItem) return;
+    const targetCustomer = exchangeTargetCustomer;
+    if (!targetCustomer) {
+      showToast('請先選擇要交換的顧客', 'error');
+      return;
+    }
+    if (targetCustomer.id === customer.id) {
+      showToast('不能跟同一位顧客交換', 'error');
+      return;
+    }
+    if (!selectedExchangeItem) {
+      showToast('請選擇對方要交換的扭蛋', 'error');
+      return;
+    }
+
+    const sourceRawIds = exchangingItem.item.rawIds || [exchangingItem.item.id];
+    const targetRawIds = selectedExchangeItem.item.rawIds || [selectedExchangeItem.item.id];
+    const sourceHasRelease = releases.some(r => r.orderId === exchangingItem.orderId && sourceRawIds.includes(r.itemId) && r.status === 'pending');
+    const targetHasRelease = releases.some(r => r.orderId === selectedExchangeItem.orderId && targetRawIds.includes(r.itemId) && r.status === 'pending');
+    if (sourceHasRelease || targetHasRelease) {
+      showToast('交換前請先取消釋出中的品項', 'error');
+      return;
+    }
+
+    const sourceOrder = orders.find(o => o.id === exchangingItem.orderId);
+    const targetOrder = orders.find(o => o.id === selectedExchangeItem.orderId);
+    if (!sourceOrder || !targetOrder) {
+      showToast('找不到交換訂單資料', 'error');
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const sourceSubtotal = exchangingItem.item.subtotal;
+    const targetSubtotal = selectedExchangeItem.item.subtotal;
+    const sourceQuantity = exchangingItem.item.quantity;
+    const targetQuantity = selectedExchangeItem.item.quantity;
+    const { rawIds: _sourceRawIds, ...sourceBase } = exchangingItem.item as any;
+    const { rawIds: _targetRawIds, ...targetBase } = selectedExchangeItem.item as any;
+
+    const itemForSource: OrderItem = {
+      ...targetBase,
+      id: crypto.randomUUID(),
+      createdAt: now,
+      updatedAt: now,
+      exchangeAt: now,
+      sourceCustomerId: targetCustomer.id,
+      sourceCustomerName: targetCustomer.name,
+      isReleased: false,
+      isChecked: false
+    };
+    const itemForTarget: OrderItem = {
+      ...sourceBase,
+      id: crypto.randomUUID(),
+      createdAt: now,
+      updatedAt: now,
+      exchangeAt: now,
+      sourceCustomerId: customer.id,
+      sourceCustomerName: customer.name,
+      isReleased: false,
+      isChecked: false
+    };
+
+    const nextSourceItems = [
+      ...sourceOrder.items.filter(item => !sourceRawIds.includes(item.id)),
+      itemForSource
+    ];
+    const nextTargetItems = [
+      ...targetOrder.items.filter(item => !targetRawIds.includes(item.id)),
+      itemForTarget
+    ];
+    const nextSourceTotal = nextSourceItems.reduce((sum, item) => sum + item.subtotal, 0);
+    const nextTargetTotal = nextTargetItems.reduce((sum, item) => sum + item.subtotal, 0);
+
+    try {
+      const batch = writeBatch(db);
+      batch.update(dbDoc('orders', sourceOrder.id), {
+        items: nextSourceItems,
+        totalAmount: nextSourceTotal,
+        updatedAt: now
+      });
+      batch.update(dbDoc('orders', targetOrder.id), {
+        items: nextTargetItems,
+        totalAmount: nextTargetTotal,
+        updatedAt: now
+      });
+      batch.set(dbDoc('customers', customer.id), {
+        totalSpent: increment(targetSubtotal - sourceSubtotal),
+        totalItems: increment(targetQuantity - sourceQuantity),
+        lastOrderAt: now
+      }, { merge: true });
+      batch.set(dbDoc('customers', targetCustomer.id), {
+        totalSpent: increment(sourceSubtotal - targetSubtotal),
+        totalItems: increment(sourceQuantity - targetQuantity),
+        lastOrderAt: now
+      }, { merge: true });
+      await batch.commit();
+      setExchangingItem(null);
+      setExchangeTargetCustomerName('');
+      setSelectedExchangeItem(null);
+      showToast(`已與 ${targetCustomer.name} 完成交換`);
+    } catch (err) {
+      setExchangingItem(null);
+      setSelectedExchangeItem(null);
+      handleFirestoreError(err, OperationType.WRITE, 'exchange');
+    }
   };
 
   return (
@@ -3463,7 +3691,14 @@ const CustomerDetailView = ({
                           <div className="flex items-center gap-2">
                             <p className="text-xs text-ink/40">{item.variant || '無款式'}</p>
                             <span className="text-[10px] text-ink/20">•</span>
-                            <p className="text-[10px] text-ink/30">{formatDateTime(item.createdAt)}</p>
+                            <p className="text-[10px] text-ink/30">喊單 {formatDateTime(item.callTime || item.createdAt)}</p>
+                          </div>
+                          <div className="flex flex-wrap gap-x-2 gap-y-1 mt-1">
+                            <p className="text-[10px] text-ink/30">建立 {formatDateTime(order.createdAt)}</p>
+                            {item.releaseAt && <p className="text-[10px] text-orange-500">釋出 {formatDateTime(item.releaseAt)}</p>}
+                            {item.transferAt && <p className="text-[10px] text-primary-blue">轉讓 {formatDateTime(item.transferAt)}</p>}
+                            {item.exchangeAt && <p className="text-[10px] text-green-600">交換 {formatDateTime(item.exchangeAt)}</p>}
+                            {item.sourceCustomerName && <p className="text-[10px] text-ink/30">來源 {item.sourceCustomerName}</p>}
                           </div>
                         </div>
                       </div>
@@ -3487,6 +3722,17 @@ const CustomerDetailView = ({
                         className="flex-1 py-2 bg-card-white text-ink/60 rounded-xl text-[10px] font-bold flex items-center justify-center gap-1"
                       >
                         <ArrowRight className="w-3 h-3" /> 轉讓
+                      </button>
+                      <button
+                        onClick={() => {
+                          setExchangingItem({ orderId: order.id, item });
+                          setExchangeTargetCustomerName('');
+                          setSelectedExchangeItem(null);
+                        }}
+                        disabled={isReleased}
+                        className="flex-1 py-2 bg-card-white text-ink/60 rounded-xl text-[10px] font-bold flex items-center justify-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        <ArrowRightLeft className="w-3 h-3" /> 交換
                       </button>
                       <button 
                         onClick={() => handleReleaseToggle(order.id, item)}
@@ -3564,6 +3810,21 @@ const CustomerDetailView = ({
                     />
                   </div>
                 </div>
+                <div>
+                  <label className="text-xs font-bold text-ink/40 block mb-1">喊單時間</label>
+                  <input
+                    type="datetime-local"
+                    className="w-full p-4 bg-background rounded-2xl border-none"
+                    value={toDateTimeInputValue(editingItem.item.callTime || editingItem.item.createdAt)}
+                    onChange={(e) => setEditingItem({
+                      ...editingItem,
+                      item: {
+                        ...editingItem.item,
+                        callTime: fromDateTimeInputValue(e.target.value, editingItem.item.createdAt || new Date().toISOString())
+                      }
+                    })}
+                  />
+                </div>
                 <div className="flex gap-2 pt-4">
                   <button onClick={() => setEditingItem(null)} className="flex-1 py-4 bg-background text-ink rounded-2xl font-bold">取消</button>
                   <button 
@@ -3621,6 +3882,87 @@ const CustomerDetailView = ({
                   </button>
                   <button onClick={() => handleUpdateItem(editingItem.orderId, editingItem.item)} className="flex-[2] py-4 bg-primary-blue text-white rounded-2xl font-bold">儲存</button>
                 </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Exchange Modal */}
+      <AnimatePresence>
+        {exchangingItem && (
+          <div className="fixed inset-0 z-[60] bg-black/40 flex items-end sm:items-center justify-center p-4">
+            <motion.div
+              initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
+              className="bg-card-white w-full max-w-lg p-6 rounded-t-3xl sm:rounded-3xl shadow-2xl max-h-[88vh] overflow-y-auto"
+            >
+              <h3 className="text-lg font-bold text-ink mb-2">交換扭蛋</h3>
+              <p className="text-sm text-ink/60 mb-4">
+                用 {exchangingItem.item.machineName}{exchangingItem.item.variant ? `（${exchangingItem.item.variant}）` : ''} 與其他顧客交換。
+              </p>
+              <div className="space-y-4">
+                <div>
+                  <label className="text-xs font-bold text-ink/40 block mb-2">交換對象</label>
+                  <SuggestiveInput
+                    value={exchangeTargetCustomerName}
+                    onChange={(value) => {
+                      setExchangeTargetCustomerName(value);
+                      setSelectedExchangeItem(null);
+                    }}
+                    placeholder="輸入或選擇顧客名稱..."
+                    suggestions={customers.filter(c => c.id !== customer.id).map(c => c.name)}
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-ink/40 block mb-2">選擇對方要交換的扭蛋</label>
+                  {!exchangeTargetCustomerName ? (
+                    <p className="text-sm text-ink/30 bg-background rounded-2xl p-4">請先選擇交換對象。</p>
+                  ) : !exchangeTargetCustomer ? (
+                    <p className="text-sm text-red-400 bg-red-50 rounded-2xl p-4">找不到這位顧客。</p>
+                  ) : exchangeTargetItems.length === 0 ? (
+                    <p className="text-sm text-ink/30 bg-background rounded-2xl p-4">這位顧客目前沒有可交換的扭蛋。</p>
+                  ) : (
+                    <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                      {exchangeTargetItems.map(({ orderId, item }) => {
+                        const selected = selectedExchangeItem?.orderId === orderId && selectedExchangeItem.item.id === item.id;
+                        return (
+                          <button
+                            key={`${orderId}-${item.id}`}
+                            onClick={() => setSelectedExchangeItem({ orderId, item })}
+                            className={cn(
+                              "w-full text-left p-4 rounded-2xl border transition-colors",
+                              selected ? "bg-primary-blue/10 border-primary-blue" : "bg-background border-transparent hover:bg-ink/5"
+                            )}
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <p className="font-bold text-ink">{item.machineName}</p>
+                                <p className="text-xs text-ink/40">{item.variant || '無款式'} • {item.quantity} 顆 • NT${item.subtotal}</p>
+                              </div>
+                              {selected && <CheckCircle2 className="w-5 h-5 text-primary-blue flex-shrink-0" />}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="flex gap-2 pt-6">
+                <button
+                  onClick={() => {
+                    setExchangingItem(null);
+                    setExchangeTargetCustomerName('');
+                    setSelectedExchangeItem(null);
+                  }}
+                  className="flex-1 py-4 bg-background text-ink rounded-2xl font-bold"
+                >
+                  取消
+                </button>
+                <button onClick={handleExchange} className="flex-1 py-4 bg-green-600 text-white rounded-2xl font-bold">
+                  確認交換
+                </button>
               </div>
             </motion.div>
           </div>
@@ -3977,13 +4319,15 @@ const Dashboard = ({
 }) => {
   const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');
+  const [dashboardDateType, setDashboardDateType] = useState<TimelineFilterType>('createdAt');
 
   const filteredOrders = orders.map(o => {
     if (!startDate && !endDate) return o;
     
     const filteredItems = o.items.filter(item => {
-      if (!item.createdAt) return false;
-      const itemDateStr = format(toZonedTime(new Date(item.createdAt), TAIWAN_TZ), 'yyyy-MM-dd');
+      const itemTime = getItemTimelineValue(item, o, dashboardDateType);
+      if (!itemTime) return false;
+      const itemDateStr = format(toZonedTime(new Date(itemTime), TAIWAN_TZ), 'yyyy-MM-dd');
       if (startDate && itemDateStr < startDate) return false;
       if (endDate && itemDateStr > endDate) return false;
       return true;
@@ -4031,6 +4375,7 @@ const Dashboard = ({
 
     try {
       const batch = writeBatch(db);
+      const now = new Date().toISOString();
 
       // 1. Find or create target customer
       let targetCust = customers.find(c => c.name.replace(/\s+/g, '') === trimmedTarget);
@@ -4042,15 +4387,20 @@ const Dashboard = ({
           name: trimmedTarget,
           totalSpent: 0,
           totalItems: 0,
-          createdAt: new Date().toISOString(),
-          lastOrderAt: new Date().toISOString()
+          createdAt: now,
+          lastOrderAt: now
         };
         batch.set(newCustRef, newCust);
         targetId = newCustRef.id;
       }
 
       // 2. Update release status
-      batch.update(dbDoc('releases', release.id), { status: 'completed' });
+      batch.update(dbDoc('releases', release.id), {
+        status: 'completed',
+        transferredAt: now,
+        transferTargetCustomerId: targetId,
+        transferTargetCustomerName: trimmedTarget
+      });
       
       // 3. Update the original order item and customer
       const orderRef = dbDoc('orders', release.orderId);
@@ -4075,7 +4425,10 @@ const Dashboard = ({
             variant: release.variant,
             price: release.price,
             quantity: transferQuantity,
-            subtotal: transferSubtotal
+            subtotal: transferSubtotal,
+            callTime: oldItems[0]?.callTime || oldItems[0]?.createdAt,
+            transferAt: now,
+            sourceCustomerName: release.customerName
           };
 
           let newItems = orderData.items.filter(i => !rawIds.includes(i.id));
@@ -4085,7 +4438,9 @@ const Dashboard = ({
               ...oldItems[0],
               id: rawIds[0],
               quantity: oldQty - transferQuantity,
-              subtotal: oldSubtotal - transferSubtotal
+              subtotal: oldSubtotal - transferSubtotal,
+              updatedAt: now,
+              transferAt: now
             };
             // @ts-ignore
             delete remainingItem.rawIds;
@@ -4100,7 +4455,7 @@ const Dashboard = ({
             batch.update(orderRef, {
               items: newItems,
               totalAmount: newTotal,
-              updatedAt: new Date().toISOString()
+              updatedAt: now
             });
           }
 
@@ -4121,9 +4476,8 @@ const Dashboard = ({
         };
 
         const targetOrder = orders.find(o => o.customerId === targetId && o.status === 'pending');
-        const now = new Date().toISOString();
         if (targetOrder) {
-          const updatedItems = [...targetOrder.items, { ...transferredItem, createdAt: now }];
+          const updatedItems = [...targetOrder.items, { ...transferredItem, createdAt: now, updatedAt: now, transferAt: now }];
 
           batch.update(dbDoc('orders', targetOrder.id), {
             items: updatedItems,
@@ -4136,7 +4490,7 @@ const Dashboard = ({
             id: newOrderRef.id,
             customerId: targetId!,
             customerName: trimmedTarget,
-            items: [{ ...transferredItem, createdAt: now }],
+            items: [{ ...transferredItem, createdAt: now, updatedAt: now, transferAt: now }],
             totalAmount: transferredItem.subtotal,
             status: 'pending',
             createdAt: now,
@@ -4146,7 +4500,7 @@ const Dashboard = ({
         batch.set(dbDoc('customers', targetId!), {
           totalSpent: increment(transferredItem.subtotal),
           totalItems: increment(transferredItem.quantity),
-          lastOrderAt: new Date().toISOString()
+          lastOrderAt: now
         }, { merge: true });
       }
 
@@ -4174,6 +4528,18 @@ const Dashboard = ({
           <span className="font-bold text-ink text-sm">日期區間篩選</span>
         </div>
         <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+          <select
+            value={dashboardDateType}
+            onChange={(e) => setDashboardDateType(e.target.value as TimelineFilterType)}
+            className="px-3 py-2 bg-background rounded-xl border-none text-sm font-bold text-ink flex-1 sm:flex-none"
+          >
+            <option value="createdAt">建立</option>
+            <option value="callTime">喊單</option>
+            <option value="updatedAt">編輯</option>
+            <option value="releaseAt">釋出</option>
+            <option value="transferAt">轉讓</option>
+            <option value="exchangeAt">交換</option>
+          </select>
           <input 
             type="date" 
             value={startDate}
@@ -4241,7 +4607,7 @@ const Dashboard = ({
                       {r.variant && <span className="text-[10px] bg-ink/5 px-1.5 py-0.5 rounded text-ink/60">{r.variant}</span>}
                     </div>
                     <p className="text-xs text-ink/40">
-                      來自 <span className="font-bold text-ink/60">{r.customerName}</span> • {r.quantity} 顆 • NT${r.price}/顆 • {formatDateTime(r.createdAt)}
+                      來自 <span className="font-bold text-ink/60">{r.customerName}</span> • {r.quantity} 顆 • NT${r.price}/顆 • 釋出 {formatDateTime(r.releaseAt || r.createdAt)}
                     </p>
                   </div>
                   <button 
