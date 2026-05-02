@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useRef, ReactNode, useCallback } from 'react';
+import React, { useState, useEffect, useRef, ReactNode } from 'react';
 import { 
   Plus, List, Package, Users, LayoutDashboard, Settings, 
   Search, Printer, Copy, Download, Upload, Trash2, 
@@ -10,17 +10,17 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut, User
-} from './mockAuth';
+} from 'firebase/auth';
 import { GoogleGenAI, Type } from '@google/genai';
 import { 
   collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, 
   query, orderBy, serverTimestamp, getDoc, getDocs, writeBatch,
-  getDocFromServer, increment, enableNetwork, disableNetwork, waitForPendingWrites
-} from './mockFirestore';
+  getDocFromServer, increment
+} from 'firebase/firestore';
 import { useReactToPrint } from 'react-to-print';
 import { format } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
-import { auth, db, col, dbDoc } from './mockFirebase';
+import { auth, db, col, dbDoc } from './firebase';
 import { cn } from './lib/utils';
 import { Customer, Order, OrderItem, SystemSettings } from './types';
 
@@ -62,7 +62,7 @@ const handleFirestoreError = (error: unknown, operationType: OperationType, path
       emailVerified: auth.currentUser?.emailVerified,
       isAnonymous: auth.currentUser?.isAnonymous,
       tenantId: auth.currentUser?.tenantId,
-      providerInfo: (auth.currentUser?.providerData || []).map(provider => ({
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
         providerId: provider.providerId,
         displayName: provider.displayName,
         email: provider.email,
@@ -73,7 +73,6 @@ const handleFirestoreError = (error: unknown, operationType: OperationType, path
     path
   };
   console.error('Firestore Error: ', JSON.stringify(errInfo));
-  window.dispatchEvent(new CustomEvent('firestore-error', { detail: errInfo }));
   throw new Error(JSON.stringify(errInfo));
 };
 
@@ -100,14 +99,10 @@ class ErrorBoundary extends React.Component<any, any> {
   render() {
     if (this.state.hasError) {
       let displayMessage = "應用程式發生錯誤。";
-      let isQuotaError = false;
       try {
         const parsed = JSON.parse(this.state.errorInfo || "");
         if (parsed.error && parsed.error.includes("insufficient permissions")) {
           displayMessage = `權限不足：無法執行 ${parsed.operationType} 操作於 ${parsed.path}。請確認您是否為管理員。`;
-        } else if (parsed.error && (parsed.error.toLowerCase().includes("quota") || parsed.error.includes("Quota exceeded") || parsed.error.includes("quota-exceeded"))) {
-          isQuotaError = true;
-          displayMessage = `資料庫免費額度已滿：無法連線至雲端。如果要繼續編輯資料，請點擊下方的「切換為本地模式」按鈕，系統會將後續的更動儲存在您的裝置中，不影響您繼續使用。`;
         }
       } catch (e) {
         displayMessage = this.state.errorInfo || "發生未知錯誤。";
@@ -118,26 +113,13 @@ class ErrorBoundary extends React.Component<any, any> {
           <div className="max-w-md w-full bg-card-white p-8 rounded-3xl card-shadow text-center">
             <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-6" />
             <h2 className="text-2xl font-bold text-ink mb-4">糟糕！出錯了</h2>
-            <p className="text-ink/60 mb-8 leading-relaxed">{displayMessage}</p>
-            <div className="flex flex-col gap-3">
-              {isQuotaError && (
-                <button 
-                  onClick={() => {
-                    localStorage.setItem('cuibo_gasha_autosync', 'false');
-                    window.location.reload();
-                  }}
-                  className="w-full py-4 bg-orange-500 text-white rounded-2xl font-bold shadow-lg shadow-orange-500/30 mb-2"
-                >
-                  切換為本地模式並繼續使用
-                </button>
-              )}
-              <button 
-                onClick={() => window.location.reload()}
-                className="w-full py-4 bg-primary-blue text-white rounded-2xl font-bold shadow-lg shadow-primary-blue/30"
-              >
-                重新整理頁面
-              </button>
-            </div>
+            <p className="text-ink/60 mb-8">{displayMessage}</p>
+            <button 
+              onClick={() => window.location.reload()}
+              className="w-full py-4 bg-primary-blue text-white rounded-2xl font-bold shadow-lg shadow-primary-blue/30"
+            >
+              重新整理頁面
+            </button>
           </div>
         </div>
       );
@@ -178,188 +160,6 @@ const DEFAULT_PRICE_MAP: Record<number, number> = {
   1500: 450
 };
 
-const normalizeOrderItem = (item: any): OrderItem => {
-  const price = Number(item?.price) || 0;
-  const quantity = Number(item?.quantity) || 0;
-  return {
-    ...item,
-    id: item?.id || crypto.randomUUID(),
-    machineName: typeof item?.machineName === 'string' ? item.machineName : '',
-    price,
-    quantity,
-    subtotal: Number(item?.subtotal) || price * quantity,
-    createdAt: typeof item?.createdAt === 'string' ? item.createdAt : new Date().toISOString()
-  };
-};
-
-const normalizeCustomer = (id: string, data: any): Customer => ({
-  id,
-  ...data,
-  name: typeof data?.name === 'string' ? data.name : '',
-  totalSpent: Number(data?.totalSpent) || 0,
-  totalItems: Number(data?.totalItems) || 0,
-  createdAt: typeof data?.createdAt === 'string' ? data.createdAt : new Date().toISOString(),
-  lastOrderAt: typeof data?.lastOrderAt === 'string' ? data.lastOrderAt : new Date().toISOString()
-});
-
-const normalizeOrder = (id: string, data: any): Order => {
-  const items = Array.isArray(data?.items) ? data.items.map(normalizeOrderItem) : [];
-  return {
-    id,
-    ...data,
-    customerId: typeof data?.customerId === 'string' ? data.customerId : '',
-    customerName: typeof data?.customerName === 'string' ? data.customerName : '',
-    items,
-    totalAmount: Number(data?.totalAmount) || items.reduce((sum, item) => sum + item.subtotal, 0),
-    status: ['pending', 'completed', 'cancelled'].includes(data?.status) ? data.status : 'pending',
-    createdAt: typeof data?.createdAt === 'string' ? data.createdAt : new Date().toISOString(),
-    updatedAt: typeof data?.updatedAt === 'string' ? data.updatedAt : new Date().toISOString()
-  };
-};
-
-const normalizeMachine = (id: string, data: any) => ({
-  id,
-  ...data,
-  name: typeof data?.name === 'string' ? data.name : '',
-  defaultPrice: Number(data?.defaultPrice) || 0,
-  variants: Array.isArray(data?.variants) ? data.variants.filter((variant: any) => typeof variant === 'string') : [],
-  createdAt: typeof data?.createdAt === 'string' ? data.createdAt : new Date().toISOString(),
-  updatedAt: typeof data?.updatedAt === 'string' ? data.updatedAt : new Date().toISOString()
-});
-
-const normalizeRelease = (id: string, data: any) => ({
-  id,
-  ...data,
-  orderId: typeof data?.orderId === 'string' ? data.orderId : '',
-  itemId: typeof data?.itemId === 'string' ? data.itemId : '',
-  customerName: typeof data?.customerName === 'string' ? data.customerName : '',
-  machineName: typeof data?.machineName === 'string' ? data.machineName : '',
-  quantity: Number(data?.quantity) || 0,
-  price: Number(data?.price) || 0,
-  status: ['pending', 'completed', 'cancelled'].includes(data?.status) ? data.status : 'pending',
-  createdAt: typeof data?.createdAt === 'string' ? data.createdAt : new Date().toISOString()
-});
-
-const normalizeSettings = (id: string, data: any): SystemSettings => ({
-  id,
-  ...data,
-  notificationTemplate: typeof data?.notificationTemplate === 'string' ? data.notificationTemplate : DEFAULT_NOTIFICATION_TEMPLATE,
-  priceMap: data?.priceMap && typeof data.priceMap === 'object' && !Array.isArray(data.priceMap) ? data.priceMap : DEFAULT_PRICE_MAP,
-  lastBackupAt: typeof data?.lastBackupAt === 'string' ? data.lastBackupAt : new Date().toISOString()
-});
-
-const IMPORT_COLLECTIONS = [
-  { key: 'customers', path: 'customers' },
-  { key: 'orders', path: 'orders' },
-  { key: 'machines', path: 'machines' },
-  { key: 'releases', path: 'releases' },
-] as const;
-
-type ImportCollectionKey = typeof IMPORT_COLLECTIONS[number]['key'];
-
-type PreparedImport = {
-  fileName: string;
-  fileSize: number;
-  counts: Record<ImportCollectionKey, number> & { images: number };
-  warnings: string[];
-  payload: {
-    customers: Customer[];
-    orders: Order[];
-    machines: any[];
-    releases: any[];
-    settings: Omit<SystemSettings, 'id'> | null;
-  };
-};
-
-const formatFileSize = (size: number) => {
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-};
-
-const prepareImportPayload = (raw: any, fileName: string, fileSize: number): PreparedImport => {
-  const importedAt = new Date().toISOString();
-  const warnings: string[] = [];
-
-  for (const { key } of IMPORT_COLLECTIONS) {
-    if (raw[key] && !Array.isArray(raw[key])) {
-      throw new Error(`Invalid backup: ${key} must be an array`);
-    }
-
-    const invalidItem = raw[key]?.find((item: any) => !item || typeof item.id !== 'string' || !item.id.trim());
-    if (invalidItem) {
-      throw new Error(`Invalid backup: ${key} contains an item without an id`);
-    }
-  }
-
-  const normalizeImportedOrderItem = (item: any): OrderItem => {
-    const price = Number(item?.price) || 0;
-    const quantity = Number(item?.quantity) || 0;
-    return {
-      id: item?.id || crypto.randomUUID(),
-      machineId: item?.machineId,
-      machineName: typeof item?.machineName === 'string' ? item.machineName : '',
-      price,
-      quantity,
-      variant: item?.variant,
-      subtotal: Number(item?.subtotal) || price * quantity,
-      isReleased: Boolean(item?.isReleased),
-      releaseQuantity: Number(item?.releaseQuantity) || 0,
-      createdAt: typeof item?.createdAt === 'string' ? item.createdAt : importedAt,
-      updatedAt: typeof item?.updatedAt === 'string' ? item.updatedAt : importedAt,
-      isChecked: Boolean(item?.isChecked)
-    };
-  };
-
-  const customers = (raw.customers || []).map((item: any) => normalizeCustomer(item.id, item));
-  const orders = (raw.orders || []).map((item: any) => normalizeOrder(item.id, {
-    ...item,
-    items: Array.isArray(item?.items) ? item.items.map(normalizeImportedOrderItem) : []
-  }));
-  const machines = (raw.machines || []).map((item: any) => normalizeMachine(item.id, item));
-  const releases = (raw.releases || []).map((item: any) => normalizeRelease(item.id, item));
-  const normalizedSettings = raw.settings
-    ? (() => {
-        const { id, ...rest } = normalizeSettings('global', raw.settings);
-        return rest;
-      })()
-    : null;
-
-  const images = machines.filter(machine => typeof machine?.imageUrl === 'string' && machine.imageUrl.trim()).length;
-  const missingOrderItems = (raw.orders || []).filter((order: any) => !Array.isArray(order?.items)).length;
-  const missingMachineVariants = (raw.machines || []).filter((machine: any) => !Array.isArray(machine?.variants)).length;
-
-  if (missingOrderItems > 0) {
-    warnings.push(`${missingOrderItems} orders had missing items and were normalized to empty lists.`);
-  }
-  if (missingMachineVariants > 0) {
-    warnings.push(`${missingMachineVariants} machines had missing variants and were normalized to empty lists.`);
-  }
-  if (!raw.settings) {
-    warnings.push('No settings found in backup. Current default settings will be used.');
-  }
-
-  return {
-    fileName,
-    fileSize,
-    counts: {
-      customers: customers.length,
-      orders: orders.length,
-      machines: machines.length,
-      releases: releases.length,
-      images
-    },
-    warnings,
-    payload: {
-      customers,
-      orders,
-      machines,
-      releases,
-      settings: normalizedSettings
-    }
-  };
-};
-
 // --- Components ---
 
 const SuggestiveInput = ({ 
@@ -376,7 +176,7 @@ const SuggestiveInput = ({
   className?: string
 }) => {
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const filtered = suggestions.filter(s => s.toLowerCase().includes(value.toLowerCase()) && s !== value);
+  const filtered = suggestions.filter(s => s.toLowerCase().includes(value.toLowerCase()) && s !== value).slice(0, 5);
 
   return (
     <div className="relative w-full">
@@ -395,7 +195,7 @@ const SuggestiveInput = ({
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -10 }}
-            className="absolute left-0 right-0 top-full mt-2 bg-card-white rounded-2xl shadow-xl z-50 overflow-y-auto max-h-60 border border-divider"
+            className="absolute left-0 right-0 top-full mt-2 bg-card-white rounded-2xl shadow-xl z-50 overflow-hidden border border-divider"
           >
             {filtered.map(s => (
               <button
@@ -433,9 +233,6 @@ const LoginScreen = () => {
     } catch (err: any) {
       if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {
         console.log('Login cancelled by user.');
-      } else if (err.code === 'auth/network-request-failed') {
-        console.error('Login error:', err);
-        setError(`登入失敗: 網路請求失敗。這通常發生在瀏覽器阻擋了第三方 Cookie 或彈出式視窗，或您正在預覽畫面中進行登入。請嘗試「在新分頁中開啟」，或關閉瀏覽器的阻擋追蹤功能。`);
       } else {
         console.error('Login error:', err);
         setError(`登入失敗: ${err.message || err.code || '未知錯誤'}`);
@@ -497,13 +294,7 @@ const Header = ({ user, activeTab }: { user: User, activeTab: string }) => {
           <p className="text-sm font-bold text-ink">{user.displayName}</p>
           <p className="text-[10px] text-ink/50">{user.email}</p>
         </div>
-        {user.photoURL ? (
-          <img src={user.photoURL} className="w-10 h-10 rounded-full border-2 border-card-white shadow-sm" alt="User" />
-        ) : (
-          <div className="w-10 h-10 rounded-full border-2 border-card-white shadow-sm bg-primary-blue/10 flex items-center justify-center text-primary-blue font-bold">
-            {user.displayName?.charAt(0) || user.email?.charAt(0) || 'U'}
-          </div>
-        )}
+        <img src={user.photoURL || ''} className="w-10 h-10 rounded-full border-2 border-card-white shadow-sm" alt="User" />
       </div>
     </header>
   );
@@ -521,7 +312,7 @@ const BottomNav = ({ activeTab, setActiveTab }: { activeTab: string, setActiveTa
   ];
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-40 bg-card-white border-t border-divider pb-[env(safe-area-inset-bottom)] shadow-2xl">
+    <nav className="fixed bottom-0 left-0 right-0 z-40 bg-card-white border-t border-divider pb-safe shadow-2xl">
       <div className="flex items-center justify-around py-1 sm:justify-center sm:gap-12">
         {navItems.map((item) => (
           <button
@@ -695,17 +486,20 @@ const CreateOrder = ({
         }
 
         if (bestMatch && lowestDist <= 6) {
-          setMachineName(bestMatch.name);
-          setPrice(bestMatch.defaultPrice);
-          if (bestMatch.variants && bestMatch.variants.length > 0) {
-            setOrderItems(bestMatch.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
-          } else {
-            setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
+          const useSame = window.confirm(`發現資料庫有相似度極高(>90%)的圖片對應機台「${bestMatch.name}」，是否直接套用該機台的資訊？`);
+          if (useSame) {
+            setMachineName(bestMatch.name);
+            setPrice(bestMatch.defaultPrice);
+            if (bestMatch.variants && bestMatch.variants.length > 0) {
+              setOrderItems(bestMatch.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
+            } else {
+              setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
+            }
+            setUploadedImage(compressedDataUrl);
+            showToast('已載入相似圖片的機台資料！', 'success');
+            setIsAnalyzing(false);
+            return;
           }
-          setUploadedImage(compressedDataUrl);
-          showToast('發現相似度極高的圖片，已載入機台資料！', 'success');
-          setIsAnalyzing(false);
-          return;
         }
       }
 
@@ -807,14 +601,30 @@ const CreateOrder = ({
         const existingMachineByName = machines.find(m => m.name === aiMachineName);
         
         if (existingMachineByName) {
-          setMachineName(existingMachineByName.name);
-          setPrice(existingMachineByName.defaultPrice);
-          if (existingMachineByName.variants && existingMachineByName.variants.length > 0) {
-            setOrderItems(existingMachineByName.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
+          const useSameSpecs = window.confirm(`AI 辨識此圖片屬於資料庫已有的機台「${aiMachineName}」，是否直接套用資料庫內的規格與預設價錢？\n（若取消則套用 AI 辨識的新規格）`);
+          
+          if (useSameSpecs) {
+            setMachineName(existingMachineByName.name);
+            setPrice(existingMachineByName.defaultPrice);
+            if (existingMachineByName.variants && existingMachineByName.variants.length > 0) {
+              setOrderItems(existingMachineByName.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
+            } else {
+              setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
+            }
+            showToast('已載入同名機台的現有資料！', 'success');
           } else {
-            setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
+            setMachineName(existingMachineByName.name);
+            setPrice(existingMachineByName.defaultPrice);
+            // 如果 AI 有辨識出款式，優先使用 AI 辨識的款式作為當前訂單項目
+            if (result.variants && result.variants.length > 0) {
+              setOrderItems(result.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
+            } else if (result.variant) {
+              setOrderItems([{ id: crypto.randomUUID(), variant: result.variant, quantity: 1, isEco: false }]);
+            } else {
+              setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
+            }
+            showToast('已載入 AI 辨識的項目！', 'success');
           }
-          showToast('AI 辨識為已有機台，已載入現有款式資料！', 'success');
         } else {
           if (aiMachineName) setMachineName(aiMachineName);
           if (result.variants && result.variants.length > 0) {
@@ -944,9 +754,7 @@ const CreateOrder = ({
             createdAt: now,
             lastOrderAt: now
           };
-          setDoc(newCustRef, newCust).catch(err => {
-            try { handleFirestoreError(err, OperationType.CREATE, 'customers'); } catch(e){}
-          });
+          await setDoc(newCustRef, newCust);
           customerId = newCustRef.id;
           customer = { id: customerId, ...newCust };
         }
@@ -981,12 +789,10 @@ const CreateOrder = ({
 
       if (totalAddedQuantity > 0 && customerId) {
         if (existingOrder) {
-          updateDoc(dbDoc('orders', existingOrder.id), {
+          await updateDoc(dbDoc('orders', existingOrder.id), {
             items: updatedItems,
             totalAmount: existingOrder.totalAmount + totalAddedAmount,
             updatedAt: now
-          }).catch(err => {
-            try { handleFirestoreError(err, OperationType.UPDATE, `orders/${existingOrder!.id}`); } catch(e){}
           });
         } else {
           // Create new order
@@ -1000,18 +806,14 @@ const CreateOrder = ({
             createdAt: now,
             updatedAt: now
           };
-          setDoc(orderRef, newOrder).catch(err => {
-            try { handleFirestoreError(err, OperationType.CREATE, 'orders'); } catch(e){}
-          });
+          await setDoc(orderRef, newOrder);
         }
         
         // 3. Update customer stats
-        updateDoc(dbDoc('customers', customerId!), {
+        await updateDoc(dbDoc('customers', customerId!), {
           totalSpent: increment(totalAddedAmount),
           totalItems: increment(totalAddedQuantity),
           lastOrderAt: now
-        }).catch(err => {
-            try { handleFirestoreError(err, OperationType.UPDATE, `customers/${customerId}`); } catch(e){}
         });
       }
 
@@ -1027,15 +829,13 @@ const CreateOrder = ({
           updates.imageUrl = uploadedImage;
         }
         if (Object.keys(updates).length > 1) { // more than just updatedAt
-          updateDoc(dbDoc('machines', machine.id), updates).catch(err => {
-            try { handleFirestoreError(err, OperationType.UPDATE, `machines/${machine.id}`); } catch(e){}
-          });
+          await updateDoc(dbDoc('machines', machine.id), updates);
         }
       } else {
         const machineRef = dbDoc('machines');
         const newMachine: any = {
           name: machineName,
-          defaultPrice: parseInt(price as any) || 0,
+          defaultPrice: parseInt(price) || 0,
           variants: Array.from(newVariantsToSave),
           createdAt: now,
           updatedAt: now
@@ -1043,9 +843,7 @@ const CreateOrder = ({
         if (uploadedImage) {
           newMachine.imageUrl = uploadedImage;
         }
-        setDoc(machineRef, newMachine).catch(err => {
-            try { handleFirestoreError(err, OperationType.CREATE, 'machines'); } catch(e){}
-        });
+        await setDoc(machineRef, newMachine);
       }
 
       showToast(totalAddedQuantity > 0 ? '訂單已更新/建立！' : '機台資料已建立！');
@@ -1083,10 +881,7 @@ const CreateOrder = ({
   
   const selectedMachine = machines.find(m => m.name === machineName);
   const variantSuggestions = selectedMachine 
-    ? Array.from(new Set([
-        ...(selectedMachine.variants || []),
-        ...orders.flatMap(o => o.items).filter(i => i.machineName === machineName).map(i => i.variant).filter(Boolean)
-      ]))
+    ? selectedMachine.variants 
     : Array.from(new Set(
         orders
           .flatMap(o => o.items)
@@ -1139,7 +934,7 @@ const CreateOrder = ({
         {uploadedImage && (
           <div className="mb-6 relative group cursor-pointer" onClick={() => setIsFullscreenImage(true)}>
             <div className="w-full h-80 sm:h-96 rounded-2xl overflow-hidden bg-background border border-divider relative">
-              <img src={uploadedImage || undefined} alt="Uploaded" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+              <img src={uploadedImage} alt="Uploaded" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
               <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors flex items-center justify-center">
                 <span className="bg-black/50 text-white px-3 py-1 rounded-full text-xs opacity-0 group-hover:opacity-100 transition-opacity">點擊放大</span>
               </div>
@@ -1300,7 +1095,7 @@ const CreateOrder = ({
               initial={{ scale: 0.9, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
-              src={uploadedImage || undefined} 
+              src={uploadedImage} 
               alt="Fullscreen" 
               className="max-w-full max-h-full object-contain rounded-lg"
               referrerPolicy="no-referrer"
@@ -1345,31 +1140,22 @@ const OrdersList = ({
       const newItems = order.items.map(i => i.id === updatedItem.id ? updatedItem : i);
       const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
 
-      const batch = writeBatch(db);
-      batch.update(dbDoc('orders', orderId), {
+      await updateDoc(dbDoc('orders', orderId), {
         items: newItems,
         totalAmount: newTotal,
         updatedAt: new Date().toISOString()
       });
       
+      // Update customer total spent and total items
       const diff = newTotal - order.totalAmount;
-      if (diff !== 0 || qtyDiff !== 0) {
-        batch.update(dbDoc('customers', order.customerId), {
-          totalSpent: increment(diff),
-          totalItems: increment(qtyDiff)
-        });
-      }
+      await updateDoc(dbDoc('customers', order.customerId), {
+        totalSpent: increment(diff),
+        totalItems: increment(qtyDiff)
+      });
 
       setEditingItem(null);
-      showToast('儲存成功');
-      await batch.commit();
-    } catch (err: any) {
-      if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-        showToast('儲存失敗：資料庫免費額度已滿', 'error');
-      } else {
-        showToast('儲存失敗', 'error');
-      }
-      setEditingItem(null);
+      showToast('更新成功');
+    } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
     }
   };
@@ -1510,7 +1296,7 @@ const OrdersList = ({
                     }}
                   >
                     {machine?.imageUrl ? (
-                      <img src={machine.imageUrl || undefined} alt={item.machineName} className="w-full h-full object-cover relative z-10 transition-transform group-hover:scale-110" referrerPolicy="no-referrer" />
+                      <img src={machine.imageUrl} alt={item.machineName} className="w-full h-full object-cover relative z-10 transition-transform group-hover:scale-110" referrerPolicy="no-referrer" />
                     ) : (
                       <Package className="w-5 h-5 text-ink/20 relative z-10" />
                     )}
@@ -1582,7 +1368,7 @@ const OrdersList = ({
                       onChange={(e) => setEditingItem({ ...editingItem, item: { ...editingItem.item, variant: e.target.value } })}
                     >
                       <option value="">選擇款式</option>
-                      {(machines.find(m => m.name === editingItem.item.machineName)?.variants || []).map((v: string) => (
+                      {machines.find(m => m.name === editingItem.item.machineName).variants.map((v: string) => (
                         <option key={v} value={v}>{v}</option>
                       ))}
                     </select>
@@ -1599,24 +1385,16 @@ const OrdersList = ({
                     <label className="text-xs font-bold text-ink/40 block mb-1">單價</label>
                     <input 
                       type="number" className="w-full p-4 bg-background rounded-2xl border-none"
-                      value={isNaN(editingItem.item.price) ? '' : editingItem.item.price}
-                      onChange={(e) => {
-                        const val = parseInt(e.target.value);
-                        const newPrice = isNaN(val) ? 0 : val;
-                        setEditingItem({ ...editingItem, item: { ...editingItem.item, price: newPrice, subtotal: newPrice * editingItem.item.quantity } })
-                      }}
+                      value={editingItem.item.price}
+                      onChange={(e) => setEditingItem({ ...editingItem, item: { ...editingItem.item, price: parseInt(e.target.value), subtotal: parseInt(e.target.value) * editingItem.item.quantity } })}
                     />
                   </div>
                   <div>
                     <label className="text-xs font-bold text-ink/40 block mb-1">數量</label>
                     <input 
                       type="number" className="w-full p-4 bg-background rounded-2xl border-none"
-                      value={isNaN(editingItem.item.quantity) ? '' : editingItem.item.quantity}
-                      onChange={(e) => {
-                        const val = parseInt(e.target.value);
-                        const newQty = isNaN(val) ? 0 : val;
-                        setEditingItem({ ...editingItem, item: { ...editingItem.item, quantity: newQty, subtotal: editingItem.item.price * newQty } })
-                      }}
+                      value={editingItem.item.quantity}
+                      onChange={(e) => setEditingItem({ ...editingItem, item: { ...editingItem.item, quantity: parseInt(e.target.value), subtotal: editingItem.item.price * parseInt(e.target.value) } })}
                     />
                   </div>
                 </div>
@@ -1630,18 +1408,16 @@ const OrdersList = ({
                         message: `確定要從這個顧客的清單中刪除 ${editingItem.item.machineName} 嗎？`,
                         type: 'danger',
                         onConfirm: async () => {
-                          setEditingItem(null);
                           const order = orders.find(o => o.id === editingItem.orderId);
                           if (!order) return;
                           const newItems = order.items.filter(i => i.id !== editingItem.item.id);
                           const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
                           
                           try {
-                            const batch = writeBatch(db);
                             if (newItems.length === 0) {
-                              batch.delete(dbDoc('orders', order.id));
+                              await deleteDoc(dbDoc('orders', order.id));
                             } else {
-                              batch.update(dbDoc('orders', order.id), {
+                              await updateDoc(dbDoc('orders', order.id), {
                                 items: newItems,
                                 totalAmount: newTotal,
                                 updatedAt: new Date().toISOString()
@@ -1649,20 +1425,14 @@ const OrdersList = ({
                             }
                             
                             // Update customer stats
-                            batch.update(dbDoc('customers', order.customerId), {
+                            await updateDoc(dbDoc('customers', order.customerId), {
                               totalSpent: increment(-editingItem.item.subtotal),
                               totalItems: increment(-editingItem.item.quantity)
                             });
                             
-                            await batch.commit();
-
+                            setEditingItem(null);
                             showToast('項目已刪除');
-                          } catch (err: any) {
-                            if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-                              showToast('刪除失敗：資料庫免費額度已滿', 'error');
-                            } else {
-                              showToast('刪除失敗', 'error');
-                            }
+                          } catch (err) {
                             handleFirestoreError(err, OperationType.WRITE, `orders/${order.id}`);
                           }
                         }
@@ -1751,8 +1521,8 @@ const CustomersList = ({
           lastOrderAt
         });
       });
-      showToast('所有顧客數據已同步');
       await batch.commit();
+      showToast('所有顧客數據已同步');
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'customers_sync');
     }
@@ -1893,8 +1663,8 @@ const CustomersList = ({
                               });
                             }
                             
-                            showToast('顧客已刪除');
                             await batch.commit();
+                            showToast('顧客已刪除');
                           } catch (err) {
                             handleFirestoreError(err, OperationType.DELETE, `customers/${customer.id}`);
                           }
@@ -1969,20 +1739,16 @@ const MachineEditModal = ({
   onSave,
   onDelete,
   orders,
-  customers,
   settings,
-  showToast,
-  setConfirmModal
+  showToast
 }: {
   machine: any;
   onClose: () => void;
   onSave: (data: any, oldName: string, variantMapping: Record<string, string>, syncWithOrders: boolean) => Promise<void>;
   onDelete: (machineId: string, machineName: string) => void;
   orders: Order[];
-  customers: Customer[];
   settings: SystemSettings | null;
   showToast: (m: string, t?: 'success' | 'error') => void;
-  setConfirmModal: (m: any) => void;
 }) => {
   const [name, setName] = useState(machine.name);
   const [price, setPrice] = useState(machine.defaultPrice.toString());
@@ -1993,57 +1759,6 @@ const MachineEditModal = ({
   const [variantMapping, setVariantMapping] = useState<Record<string, string>>({});
   const [uploadedImage, setUploadedImage] = useState<string | null>(machine.imageUrl || null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const [editingItem, setEditingItem] = useState<{ orderId: string, item: OrderItem } | null>(null);
-
-  const handleUpdateItem = async (orderId: string, updatedItem: OrderItem) => {
-    try {
-      const order = orders.find(o => o.id === orderId);
-      if (!order) return;
-
-      const oldItem = order.items.find(i => i.id === updatedItem.id);
-      const qtyDiff = updatedItem.quantity - (oldItem?.quantity || 0);
-
-      updatedItem.updatedAt = new Date().toISOString();
-      const newItems = order.items.map(i => i.id === updatedItem.id ? updatedItem : i);
-      const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
-
-      const batch = writeBatch(db);
-      batch.update(dbDoc('orders', orderId), {
-        items: newItems,
-        totalAmount: newTotal,
-        updatedAt: new Date().toISOString()
-      });
-      
-      const diff = newTotal - order.totalAmount;
-      if (diff !== 0 || qtyDiff !== 0) {
-        batch.update(dbDoc('customers', order.customerId), {
-          totalSpent: increment(diff),
-          totalItems: increment(qtyDiff)
-        });
-      }
-
-      setEditingItem(null);
-      showToast('儲存成功');
-      await batch.commit();
-    } catch (err: any) {
-      if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-        showToast('儲存失敗：資料庫免費額度已滿', 'error');
-      } else {
-        showToast('儲存失敗', 'error');
-      }
-      setEditingItem(null);
-      handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
-    }
-  };
-
-  const machineOrders = orders
-    .filter(o => o.items.some(i => i.machineName === machine.name))
-    .map(o => ({
-      ...o,
-      items: o.items.filter(i => i.machineName === machine.name)
-    }))
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -2196,7 +1911,7 @@ const MachineEditModal = ({
 
   return (
     <div className="fixed inset-0 z-[110] bg-black/50 flex items-center justify-center p-4">
-      <div className="bg-background w-full max-w-4xl rounded-3xl shadow-2xl flex flex-col max-h-[90vh]">
+      <div className="bg-background w-full max-w-2xl rounded-3xl shadow-2xl flex flex-col max-h-[90vh]">
         <div className="p-6 border-b border-divider flex justify-between items-center bg-card-white rounded-t-3xl">
           <h3 className="text-xl font-bold text-ink">編輯機台: {machine.name}</h3>
           <button onClick={onClose} className="p-2 hover:bg-background rounded-full transition-colors">
@@ -2249,7 +1964,7 @@ const MachineEditModal = ({
             {uploadedImage ? (
               <div className="relative group">
                 <div className="w-full h-48 rounded-2xl overflow-hidden bg-card-white border border-divider">
-                  <img src={uploadedImage || undefined} alt="Machine" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+                  <img src={uploadedImage} alt="Machine" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
                 </div>
                 <button 
                   onClick={() => setUploadedImage(null)}
@@ -2322,51 +2037,6 @@ const MachineEditModal = ({
               </button>
             </div>
           </div>
-
-          <div className="pt-6 border-t border-divider">
-            <h4 className="text-sm font-bold text-ink/40 uppercase tracking-widest mb-4">這台機台的扭蛋紀錄</h4>
-            {machineOrders.length === 0 ? (
-              <p className="text-center py-8 text-ink/30 font-medium">尚無顧客扭這台機台</p>
-            ) : (
-              <div className="space-y-3">
-                {machineOrders.map(order => 
-                  order.items.map(item => (
-                    <div key={item.id} className="flex flex-col sm:flex-row sm:items-center justify-between p-4 bg-background rounded-2xl hover:bg-ink/5 transition-colors">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-primary-blue/10 rounded-xl flex items-center justify-center text-primary-blue font-bold">
-                          {item.quantity}
-                        </div>
-                        <div>
-                          <div className="font-bold text-ink text-sm">
-                            {order.customerName}
-                          </div>
-                          {item.variant ? (
-                            <span className="text-xs text-ink/60 bg-white px-2 py-0.5 rounded-md mt-1 inline-block border border-divider">
-                              {item.variant}
-                            </span>
-                          ) : (
-                            <span className="text-xs text-ink/40 italic mt-1 inline-block">未指定款式</span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex items-center justify-end gap-4 mt-3 sm:mt-0">
-                        <div className="text-right">
-                          <div className="text-xs text-ink/40">NT$ {item.subtotal}</div>
-                          <div className="text-[10px] text-ink/30">{format(toZonedTime(new Date(order.createdAt), TAIWAN_TZ), 'yyyy/MM/dd HH:mm')}</div>
-                        </div>
-                        <button 
-                          onClick={() => setEditingItem({ orderId: order.id, item })}
-                          className="p-2 text-primary-blue hover:text-white hover:bg-primary-blue rounded-xl transition-all border border-primary-blue/20 bg-white"
-                        >
-                          <Save className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-          </div>
         </div>
 
         <div className="p-6 border-t border-divider bg-card-white rounded-b-3xl flex justify-between">
@@ -2407,111 +2077,6 @@ const MachineEditModal = ({
           </label>
         </div>
       </div>
-
-      {/* Editing Item Modal */ }
-      <AnimatePresence>
-        {editingItem && (
-          <div className="fixed inset-0 z-[120] bg-black/40 flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-card-white w-full max-w-sm p-6 rounded-3xl shadow-2xl"
-            >
-              <h3 className="text-lg font-bold text-ink mb-4">編輯訂單項目</h3>
-              <div className="space-y-4">
-                <div>
-                  <label className="text-xs font-bold text-ink/40 block mb-1">款式</label>
-                  <SuggestiveInput 
-                    value={editingItem.item.variant || ''}
-                    onChange={(v) => setEditingItem({ ...editingItem, item: { ...editingItem.item, variant: v } })}
-                    placeholder="輸入款式"
-                    suggestions={variantList}
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-xs font-bold text-ink/40 block mb-1">數量</label>
-                    <input 
-                      type="number" className="w-full p-4 bg-background rounded-2xl border-none"
-                      value={isNaN(editingItem.item.quantity) ? '' : editingItem.item.quantity}
-                      onChange={(e) => {
-                        const val = parseInt(e.target.value);
-                        const newQty = isNaN(val) ? 1 : Math.max(1, val);
-                        setEditingItem({ ...editingItem, item: { ...editingItem.item, quantity: newQty, subtotal: editingItem.item.price * newQty } })
-                      }}
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs font-bold text-ink/40 block mb-1">單價 (NT$)</label>
-                    <input 
-                      type="number" className="w-full p-4 bg-background rounded-2xl border-none"
-                      value={isNaN(editingItem.item.price) ? '' : editingItem.item.price}
-                      onChange={(e) => {
-                        const val = parseInt(e.target.value);
-                        const newPrice = isNaN(val) ? 0 : val;
-                        setEditingItem({ ...editingItem, item: { ...editingItem.item, price: newPrice, subtotal: newPrice * editingItem.item.quantity } })
-                      }}
-                    />
-                  </div>
-                </div>
-                <div className="pt-2 flex gap-2">
-                  <button onClick={() => setEditingItem(null)} className="flex-1 py-4 bg-background text-ink rounded-2xl font-bold">取消</button>
-                  <button 
-                    onClick={() => {
-                      setConfirmModal({
-                        show: true,
-                        title: '刪除項目',
-                        message: `確定要刪除這筆訂單項目嗎？`,
-                        type: 'danger',
-                        onConfirm: async () => {
-                          setEditingItem(null);
-                          const order = orders.find(o => o.id === editingItem.orderId);
-                          if (!order) return;
-                          const newItems = order.items.filter(i => i.id !== editingItem.item.id);
-                          const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
-                          
-                          try {
-                            const batch = writeBatch(db);
-                            if (newItems.length === 0) {
-                              batch.delete(dbDoc('orders', order.id));
-                            } else {
-                              batch.update(dbDoc('orders', order.id), {
-                                items: newItems,
-                                totalAmount: newTotal,
-                                updatedAt: new Date().toISOString()
-                              });
-                            }
-                            
-                            // Update customer stats
-                            batch.update(dbDoc('customers', order.customerId), {
-                              totalSpent: increment(-editingItem.item.subtotal),
-                              totalItems: increment(-editingItem.item.quantity)
-                            });
-                            
-                            await batch.commit();
-
-                            showToast('項目已刪除');
-                          } catch (err: any) {
-                            if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-                              showToast('刪除失敗：資料庫免費額度已滿', 'error');
-                            } else {
-                              showToast('刪除失敗', 'error');
-                            }
-                            handleFirestoreError(err, OperationType.WRITE, `orders/${order.id}`);
-                          }
-                        }
-                      });
-                    }}
-                    className="p-4 bg-red-50 text-red-500 rounded-2xl"
-                  >
-                    <Trash2 className="w-5 h-5" />
-                  </button>
-                  <button onClick={() => handleUpdateItem(editingItem.orderId, editingItem.item)} className="flex-[2] py-4 bg-primary-blue text-white rounded-2xl font-bold">儲存</button>
-                </div>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
     </div>
   );
 };
@@ -2540,7 +2105,6 @@ const MachineManagement = ({
   const [editingVariantIndex, setEditingVariantIndex] = useState<number | null>(null);
   const [editingVariantValue, setEditingVariantValue] = useState('');
   const [viewMode, setViewMode] = useState<'list' | 'grid-sm' | 'grid-lg'>('list');
-  const [machineSearchTerm, setMachineSearchTerm] = useState('');
 
   // Derive all unique machine names from orders
   const machineNamesFromOrders = Array.from(new Set(orders.flatMap(o => o.items.map(i => i.machineName))));
@@ -2549,7 +2113,7 @@ const MachineManagement = ({
   const allMachineNames = Array.from(new Set([
     ...machineNamesFromOrders,
     ...machines.map(m => m.name)
-  ])).sort().filter(name => name.toLowerCase().includes(machineSearchTerm.toLowerCase()));
+  ])).sort();
 
   const autoInitializeUnsetMachines = async () => {
     const unsetMachines = allMachineNames.filter(name => !machines.find(m => m.name === name));
@@ -2599,8 +2163,8 @@ const MachineManagement = ({
             addedCount++;
           });
 
-      showToast(`成功初始化 ${addedCount} 個機台！`);
           await batch.commit();
+          showToast(`成功初始化 ${addedCount} 個機台！`);
         } catch (err) {
           handleFirestoreError(err, OperationType.WRITE, 'machines_batch_init');
         }
@@ -2629,9 +2193,9 @@ const MachineManagement = ({
         return;
       }
       const newDocRef = dbDoc('machines');
+      await setDoc(newDocRef, data);
       showToast('機台新增成功');
       reset();
-      await setDoc(newDocRef, data);
     } catch (err: any) {
       console.error(err);
       showToast(err?.message?.includes('Missing or insufficient') ? '資料驗證失敗，請檢查權限或格式！' : '發生錯誤，請稍後再試！', 'error');
@@ -2777,16 +2341,6 @@ const MachineManagement = ({
       <div className="flex justify-between items-center">
         <h3 className="text-lg font-bold text-ink">機台列表</h3>
         <div className="flex items-center gap-2">
-          <div className="relative">
-            <input 
-              type="text" 
-              placeholder="搜尋機台..." 
-              className="pl-10 pr-4 py-2 bg-background rounded-xl border-none text-sm w-48 sm:w-64"
-              value={machineSearchTerm}
-              onChange={(e) => setMachineSearchTerm(e.target.value)}
-            />
-            <Search className="w-4 h-4 text-ink/40 absolute left-3 top-1/2 -translate-y-1/2" />
-          </div>
           <div className="flex bg-background rounded-xl p-1">
             <button onClick={() => setViewMode('list')} className={cn("p-2 rounded-lg transition-colors", viewMode === 'list' ? "bg-white shadow-sm" : "text-ink/40 hover:text-ink")}>
               <List className="w-4 h-4" />
@@ -2863,7 +2417,7 @@ const MachineManagement = ({
                   viewMode === 'grid-sm' ? "h-24" : "h-48"
                 )}>
                   {config?.imageUrl ? (
-                    <img src={config.imageUrl || undefined} alt={machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                    <img src={config.imageUrl} alt={machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                   ) : (
                     <Package className="w-8 h-8 text-ink/10" />
                   )}
@@ -2874,7 +2428,7 @@ const MachineManagement = ({
                 {viewMode === 'list' && (
                   <div className="w-12 h-12 bg-background rounded-2xl flex items-center justify-center overflow-hidden flex-shrink-0">
                     {config?.imageUrl ? (
-                      <img src={config.imageUrl || undefined} alt={machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                      <img src={config.imageUrl} alt={machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                     ) : (
                       <Package className="w-6 h-6 text-ink/20" />
                     )}
@@ -2890,7 +2444,7 @@ const MachineManagement = ({
                       <p className="text-xs text-ink/40 mb-2">預設金額: ¥{config.defaultPrice}</p>
                       {viewMode !== 'grid-sm' && (
                         <div className="flex flex-wrap gap-1">
-                          {(config.variants || []).map((v: string) => (
+                          {config.variants.map((v: string) => (
                             <span key={v} className="px-2 py-1 bg-background rounded text-[10px] font-bold text-ink/60">{v}</span>
                           ))}
                         </div>
@@ -3023,46 +2577,32 @@ const CustomerDetailView = ({
       
       const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
 
-      const batch = writeBatch(db);
-      batch.update(dbDoc('orders', orderId), {
+      await updateDoc(dbDoc('orders', orderId), {
         items: newItems,
         totalAmount: newTotal,
         updatedAt: new Date().toISOString()
       });
       
+      // Update customer total spent and total items
       const diff = newTotal - order.totalAmount;
-      if (diff !== 0 || qtyDiff !== 0) {
-        batch.update(dbDoc('customers', customer.id), {
-          totalSpent: increment(diff),
-          totalItems: increment(qtyDiff)
-        });
-      }
+      await updateDoc(dbDoc('customers', customer.id), {
+        totalSpent: increment(diff),
+        totalItems: increment(qtyDiff)
+      });
 
       setEditingItem(null);
-      showToast('儲存成功');
-      await batch.commit();
-    } catch (err: any) {
-      if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-        showToast('儲存失敗：資料庫免費額度已滿', 'error');
-      } else {
-        showToast('儲存失敗', 'error');
-      }
-      setEditingItem(null);
+      showToast('更新成功');
+    } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `orders/${orderId}`);
     }
   };
 
   const handleTransfer = async () => {
-    if (!transferringItem || transferQuantity < 1) return;
-    const trimmedTarget = targetCustomerName.replace(/\s+/g, '');
-    if (!trimmedTarget) {
-      showToast('請輸入目標顧客名稱', 'error');
-      return;
-    }
-
+    if (!transferringItem || !targetCustomerName.replace(/\s+/g, '') || transferQuantity < 1) return;
     const { orderId, item } = transferringItem;
     // @ts-ignore
     const rawIds = item.rawIds || [item.id];
+    const trimmedTarget = targetCustomerName.replace(/\s+/g, '');
 
     if (trimmedTarget === customer.name.replace(/\s+/g, '')) {
       showToast('不能轉讓給原顧客自己！', 'error');
@@ -3070,8 +2610,6 @@ const CustomerDetailView = ({
     }
 
     try {
-      const batch = writeBatch(db);
-
       // 1. Find or create target customer
       let targetCust = customers.find(c => c.name.replace(/\s+/g, '') === trimmedTarget);
       let targetId = targetCust?.id;
@@ -3085,107 +2623,76 @@ const CustomerDetailView = ({
           createdAt: new Date().toISOString(),
           lastOrderAt: new Date().toISOString()
         };
-        batch.set(newCustRef, newCust);
+        await setDoc(newCustRef, newCust);
         targetId = newCustRef.id;
+        targetCust = { id: targetId, ...newCust } as Customer;
       }
 
       // 2. Remove or update from current order
       const currentOrder = orders.find(o => o.id === orderId);
-      if (!currentOrder) {
-        showToast('找不到原始訂單！', 'error');
-        return;
-      }
+      if (!currentOrder) return;
 
       const transferSubtotal = item.price * transferQuantity;
       
-      const oldItems = currentOrder.items.filter(i => rawIds.includes(i.id));
-      const oldQty = oldItems.reduce((sum, i) => sum + i.quantity, 0);
-      const oldSubtotal = oldItems.reduce((sum, i) => sum + i.subtotal, 0);
-
+      // Filter out raw items to rebuild
       let newItems = currentOrder.items.filter(i => !rawIds.includes(i.id));
       
-      if (transferQuantity < oldQty) {
-        const remainingItem = {
-          ...oldItems[0],
+      if (transferQuantity < item.quantity) {
+        // We push a consolidated remaining item to simplify logic
+        newItems.push({
+          ...item,
           id: rawIds[0],
-          quantity: oldQty - transferQuantity,
-          subtotal: oldSubtotal - transferSubtotal
-        };
-        // @ts-ignore
-        delete remainingItem.rawIds;
-        newItems.push(remainingItem);
-      }
-      
-      const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
-
-      if (newItems.length === 0) {
-        batch.delete(dbDoc('orders', orderId));
-      } else {
-        batch.update(dbDoc('orders', orderId), {
-          items: newItems,
-          totalAmount: newTotal,
-          updatedAt: new Date().toISOString()
+          quantity: item.quantity - transferQuantity,
+          subtotal: item.subtotal - transferSubtotal
         });
       }
       
-      batch.set(dbDoc('customers', customer.id), {
+      const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
+      await updateDoc(dbDoc('orders', orderId), {
+        items: newItems,
+        totalAmount: newTotal,
+        updatedAt: new Date().toISOString()
+      });
+      await updateDoc(dbDoc('customers', customer.id), {
         totalSpent: increment(-transferSubtotal),
         totalItems: increment(-transferQuantity)
-      }, { merge: true });
+      });
 
       // 3. Add to target customer's pending order or create new
       const targetOrder = orders.find(o => o.customerId === targetId && o.status === 'pending');
       const now = new Date().toISOString();
-      const safeTransferredItem = {
-        id: crypto.randomUUID(),
-        machineName: item.machineName,
-        price: item.price,
-        quantity: transferQuantity,
-        subtotal: transferSubtotal,
-        createdAt: now,
-        ...(item.variant ? { variant: item.variant } : {}),
-        ...(item.machineId ? { machineId: item.machineId } : {})
-      };
+      const transferredNewItem = { ...item, id: crypto.randomUUID(), quantity: transferQuantity, subtotal: transferSubtotal, createdAt: now };
+      delete transferredNewItem.rawIds;
 
       if (targetOrder) {
-        batch.update(dbDoc('orders', targetOrder.id), {
-          items: [...targetOrder.items, safeTransferredItem],
+        const updatedItems = [...targetOrder.items, transferredNewItem];
+
+        await updateDoc(dbDoc('orders', targetOrder.id), {
+          items: updatedItems,
           totalAmount: targetOrder.totalAmount + transferSubtotal,
           updatedAt: now
         });
       } else {
-        const newOrderRef = dbDoc('orders');
-        batch.set(newOrderRef, {
-          id: newOrderRef.id,
-          customerId: targetId!,
+        await setDoc(dbDoc('orders'), {
+          customerId: targetId,
           customerName: trimmedTarget,
-          items: [safeTransferredItem],
+          items: [transferredNewItem],
           totalAmount: transferSubtotal,
           status: 'pending',
           createdAt: now,
           updatedAt: now
         });
       }
-      batch.set(dbDoc('customers', targetId!), {
+      await updateDoc(dbDoc('customers', targetId!), {
         totalSpent: increment(transferSubtotal),
         totalItems: increment(transferQuantity),
         lastOrderAt: new Date().toISOString()
-      }, { merge: true });
+      });
 
       setTransferringItem(null);
       setTargetCustomerName('');
-      setTransferQuantity(1);
-      showToast(`已成功轉讓給 ${trimmedTarget}`);
-      await batch.commit();
-    } catch (err: any) {
-      console.error("Transfer Error:", err);
-      if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-        showToast('轉讓失敗：資料庫免費額度已滿', 'error');
-      } else {
-        showToast('轉讓失敗，請檢查網路連線或稍後重試', 'error');
-      }
-      setTransferringItem(null);
-      setTargetCustomerName('');
+      showToast(`已轉讓給 ${trimmedTarget}`);
+    } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'transfer');
     }
   };
@@ -3195,8 +2702,8 @@ const CustomerDetailView = ({
       const rawIds = item.rawIds || [item.id];
       const existing = releases.find(r => r.orderId === orderId && rawIds.includes(r.itemId) && r.status === 'pending');
       if (existing) {
-        showToast('已取消釋出');
         await deleteDoc(dbDoc('releases', existing.id));
+        showToast('已取消釋出');
       } else {
         setReleasingItem({ orderId, item: { ...item, id: rawIds[0] } });
         setReleaseQuantity(item.quantity);
@@ -3214,7 +2721,6 @@ const CustomerDetailView = ({
       const releaseData: any = {
         orderId,
         itemId: item.id,
-        rawIds: (item as any).rawIds || [item.id],
         customerName: customer.name,
         machineName: item.machineName,
         quantity: releaseQuantity,
@@ -3225,16 +2731,10 @@ const CustomerDetailView = ({
       if (item.variant) {
         releaseData.variant = item.variant;
       }
+      await setDoc(releaseRef, releaseData);
       showToast('正在釋出中');
       setReleasingItem(null);
-      await setDoc(releaseRef, releaseData);
-    } catch (err: any) {
-      if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-        showToast('釋出失敗：資料庫免費額度已滿', 'error');
-      } else {
-        showToast('釋出失敗', 'error');
-      }
-      setReleasingItem(null);
+    } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'releases');
     }
   };
@@ -3365,15 +2865,8 @@ const CustomerDetailView = ({
       </header>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-6 pb-32">
-        {customerOrders.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-20 text-center">
-            <Package className="w-12 h-12 text-ink/20 mb-4" />
-            <p className="font-bold text-ink/40">這個顧客目前沒有訂單紀錄</p>
-            <p className="text-xs text-ink/30 mt-2 max-w-[200px]">若是總顆數顯示與實際不符，請點擊上方右上角的「重新計算」按鈕進行校正。</p>
-          </div>
-        ) : (
-          customerOrders.map(order => {
-            const groupedItems = groupOrderItems(order);
+        {customerOrders.map(order => {
+          const groupedItems = groupOrderItems(order);
           return (
             <div key={order.id} className="bg-card-white p-6 rounded-3xl card-shadow border-l-4 border-primary-blue">
               <div className="flex justify-between items-center mb-4">
@@ -3387,7 +2880,6 @@ const CustomerDetailView = ({
                       type: 'danger',
                       onConfirm: async () => {
                         try {
-                          showToast('訂單已刪除');
                           await deleteDoc(dbDoc('orders', order.id));
                           
                           // Update customer stats
@@ -3395,6 +2887,8 @@ const CustomerDetailView = ({
                             totalSpent: increment(-order.totalAmount),
                             totalItems: increment(-order.items.reduce((sum, i) => sum + i.quantity, 0))
                           });
+
+                          showToast('訂單已刪除');
                         } catch (err) {
                           handleFirestoreError(err, OperationType.DELETE, `orders/${order.id}`);
                         }
@@ -3407,10 +2901,7 @@ const CustomerDetailView = ({
                 </button>
               </div>
               <div className="space-y-4">
-                {groupedItems.length === 0 ? (
-                  <p className="text-center py-4 text-ink/30 font-medium text-sm">訂單內無項目</p>
-                ) : (
-                  groupedItems.map((item, idx) => {
+                {groupedItems.map((item, idx) => {
                   // For grouped items, we just check if ANY of their raw items has a pending release.
                   // Since all raw items in the group have the same machine & variant, it's safe to visually track the first one
                   const isReleased = item.rawIds.some(rawId => releases.some(r => r.orderId === order.id && r.itemId === rawId && r.status === 'pending'));
@@ -3436,7 +2927,7 @@ const CustomerDetailView = ({
                           }}
                         >
                           {machine?.imageUrl ? (
-                            <img src={machine.imageUrl || undefined} alt={item.machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                            <img src={machine.imageUrl} alt={item.machineName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                           ) : (
                             <Package className="w-5 h-5 text-ink/20" />
                           )}
@@ -3500,11 +2991,11 @@ const CustomerDetailView = ({
                     </div>
                   </div>
                 );
-              }))}
+              })}
             </div>
           </div>
           );
-        }))}
+        })}
       </div>
 
       {/* Edit Modal */}
@@ -3526,7 +3017,7 @@ const CustomerDetailView = ({
                       onChange={(e) => setEditingItem({ ...editingItem, item: { ...editingItem.item, variant: e.target.value } })}
                     >
                       <option value="">選擇款式</option>
-                      {(machines.find(m => m.name === editingItem.item.machineName)?.variants || []).map((v: string) => (
+                      {machines.find(m => m.name === editingItem.item.machineName).variants.map((v: string) => (
                         <option key={v} value={v}>{v}</option>
                       ))}
                     </select>
@@ -3543,24 +3034,16 @@ const CustomerDetailView = ({
                     <label className="text-xs font-bold text-ink/40 block mb-1">單價</label>
                     <input 
                       type="number" className="w-full p-4 bg-background rounded-2xl border-none"
-                      value={isNaN(editingItem.item.price) ? '' : editingItem.item.price}
-                      onChange={(e) => {
-                        const val = parseInt(e.target.value);
-                        const newPrice = isNaN(val) ? 0 : val;
-                        setEditingItem({ ...editingItem, item: { ...editingItem.item, price: newPrice, subtotal: newPrice * editingItem.item.quantity } })
-                      }}
+                      value={editingItem.item.price}
+                      onChange={(e) => setEditingItem({ ...editingItem, item: { ...editingItem.item, price: parseInt(e.target.value), subtotal: parseInt(e.target.value) * editingItem.item.quantity } })}
                     />
                   </div>
                   <div>
                     <label className="text-xs font-bold text-ink/40 block mb-1">數量</label>
                     <input 
                       type="number" className="w-full p-4 bg-background rounded-2xl border-none"
-                      value={isNaN(editingItem.item.quantity) ? '' : editingItem.item.quantity}
-                      onChange={(e) => {
-                        const val = parseInt(e.target.value);
-                        const newQty = isNaN(val) ? 0 : val;
-                        setEditingItem({ ...editingItem, item: { ...editingItem.item, quantity: newQty, subtotal: editingItem.item.price * newQty } })
-                      }}
+                      value={editingItem.item.quantity}
+                      onChange={(e) => setEditingItem({ ...editingItem, item: { ...editingItem.item, quantity: parseInt(e.target.value), subtotal: editingItem.item.price * parseInt(e.target.value) } })}
                     />
                   </div>
                 </div>
@@ -3574,7 +3057,6 @@ const CustomerDetailView = ({
                         message: `確定要從訂單中刪除 ${editingItem.item.machineName} 嗎？`,
                         type: 'danger',
                         onConfirm: async () => {
-                          setEditingItem(null);
                           const order = orders.find(o => o.id === editingItem.orderId);
                           if (!order) return;
                           
@@ -3584,11 +3066,10 @@ const CustomerDetailView = ({
                           const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
                           
                           try {
-                            const batch = writeBatch(db);
                             if (newItems.length === 0) {
-                              batch.delete(dbDoc('orders', order.id));
+                              await deleteDoc(dbDoc('orders', order.id));
                             } else {
-                              batch.update(dbDoc('orders', order.id), {
+                              await updateDoc(dbDoc('orders', order.id), {
                                 items: newItems,
                                 totalAmount: newTotal,
                                 updatedAt: new Date().toISOString()
@@ -3596,20 +3077,14 @@ const CustomerDetailView = ({
                             }
                             
                             // Update customer stats
-                            batch.update(dbDoc('customers', order.customerId), {
+                            await updateDoc(dbDoc('customers', order.customerId), {
                               totalSpent: increment(-editingItem.item.subtotal),
                               totalItems: increment(-editingItem.item.quantity)
                             });
                             
-                            await batch.commit();
-
+                            setEditingItem(null);
                             showToast('項目已刪除');
-                          } catch (err: any) {
-                            if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-                              showToast('刪除失敗：資料庫免費額度已滿', 'error');
-                            } else {
-                              showToast('刪除失敗', 'error');
-                            }
+                          } catch (err) {
                             handleFirestoreError(err, OperationType.WRITE, `orders/${order.id}`);
                           }
                         }
@@ -3694,150 +3169,6 @@ const CustomerDetailView = ({
   );
 };
 
-type PrintCustomerBlock = {
-  customer: Customer;
-  items: OrderItem[];
-  isContinuation: boolean;
-  isLastSegment: boolean;
-  totalAmount: number;
-};
-
-type PrintPage = {
-  blocks: PrintCustomerBlock[];
-};
-
-const PRINT_PAGE_CAPACITY = 32;
-const PRINT_HEADER_UNITS = 5;
-const PRINT_FOOTER_UNITS = 2;
-const PRINT_BLOCK_GAP_UNITS = 1;
-
-const sortPrintItems = (items: OrderItem[]) => {
-  return [...items].sort((a, b) => {
-    if (a.machineName === b.machineName) {
-      const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-      const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-      return aTime - bTime;
-    }
-    return a.machineName.localeCompare(b.machineName, 'zh-Hant');
-  });
-};
-
-const buildPrintPages = (selectedCustomers: Customer[], orders: Order[]): PrintPage[] => {
-  const pages: PrintPage[] = [{ blocks: [] }];
-  let remaining = PRINT_PAGE_CAPACITY;
-
-  const currentPage = () => pages[pages.length - 1];
-  const newPage = () => {
-    pages.push({ blocks: [] });
-    remaining = PRINT_PAGE_CAPACITY;
-  };
-
-  selectedCustomers.forEach((customer) => {
-    const customerOrders = orders.filter(o => o.customerId === customer.id);
-    const allItems = sortPrintItems(customerOrders.flatMap(o => o.items));
-    const totalAmount = customerOrders.reduce((sum, order) => sum + order.totalAmount, 0) || customer.totalSpent;
-
-    if (allItems.length === 0) {
-      const needed = PRINT_HEADER_UNITS + PRINT_FOOTER_UNITS + PRINT_BLOCK_GAP_UNITS;
-      if (currentPage().blocks.length > 0 && remaining < needed) newPage();
-      currentPage().blocks.push({ customer, items: [], isContinuation: false, isLastSegment: true, totalAmount });
-      remaining -= needed;
-      return;
-    }
-
-    let index = 0;
-    let isFirstSegment = true;
-
-    while (index < allItems.length) {
-      if (remaining < PRINT_HEADER_UNITS + 1 + PRINT_BLOCK_GAP_UNITS) {
-        newPage();
-      }
-
-      const availableRows = Math.max(1, remaining - PRINT_HEADER_UNITS - PRINT_BLOCK_GAP_UNITS);
-      const rowsIfLastSegment = Math.max(1, availableRows - PRINT_FOOTER_UNITS);
-      const remainingItems = allItems.length - index;
-      const isLastSegment = remainingItems <= rowsIfLastSegment;
-      const rowsOnThisPage = isLastSegment ? remainingItems : availableRows;
-      const pageItems = allItems.slice(index, index + rowsOnThisPage);
-
-      currentPage().blocks.push({
-        customer,
-        items: pageItems,
-        isContinuation: !isFirstSegment,
-        isLastSegment,
-        totalAmount
-      });
-
-      remaining -= PRINT_HEADER_UNITS + pageItems.length + PRINT_BLOCK_GAP_UNITS + (isLastSegment ? PRINT_FOOTER_UNITS : 0);
-      index += pageItems.length;
-      isFirstSegment = false;
-    }
-  });
-
-  return pages.filter(page => page.blocks.length > 0);
-};
-
-const PrintCustomerTable = ({ block }: { block: PrintCustomerBlock }) => (
-  <section className="print-customer-block">
-    <table className="w-full text-left text-sm">
-      <thead>
-        <tr>
-          <th colSpan={6} className="pb-2">
-            <div className="border-b-2 border-ink pb-2 text-center">
-              <h1 className="text-xl font-bold text-ink">
-                {block.customer.name}{block.isContinuation ? '（續）' : ''} 訂單明細
-              </h1>
-              <div className="mt-1 flex items-center justify-between text-[10px] font-bold text-ink/60">
-                <span>列印日期：{format(toZonedTime(new Date(), TAIWAN_TZ), 'yyyy/MM/dd')}</span>
-                <span>顧客：{block.customer.name}</span>
-              </div>
-            </div>
-          </th>
-        </tr>
-        <tr className="border-b-2 border-ink bg-ink/5 text-xs print:bg-transparent">
-          <th className="w-[8%] px-2 py-2 text-center"></th>
-          <th className="w-[40%] px-2 py-2">機台名稱</th>
-          <th className="w-[22%] px-2 py-2">款式</th>
-          <th className="w-[10%] px-2 py-2">單價</th>
-          <th className="w-[8%] px-2 py-2">數量</th>
-          <th className="w-[12%] px-2 py-2 text-right">小計</th>
-        </tr>
-      </thead>
-      <tbody>
-        {block.items.length === 0 ? (
-          <tr className="border-b border-divider print:border-ink/10">
-            <td colSpan={6} className="px-2 py-4 text-center text-ink/40">沒有明細</td>
-          </tr>
-        ) : (
-          block.items.map((item, idx) => (
-            <tr key={item.id || idx} className="border-b border-divider print:border-ink/10">
-              <td className="px-2 py-1.5 text-center align-middle">
-                <div className="mx-auto h-4 w-4 rounded-sm border-2 border-ink/40 print:border-black"></div>
-              </td>
-              <td className="px-2 py-1.5">
-                <div className="font-medium leading-tight">{item.machineName}</div>
-                <div className="text-[10px] text-ink/30 print:text-ink/50">{formatDateTime(item.createdAt)}</div>
-              </td>
-              <td className="px-2 py-1.5">{item.variant || '-'}</td>
-              <td className="px-2 py-1.5">NT${item.price}</td>
-              <td className="px-2 py-1.5">{item.quantity}</td>
-              <td className="px-2 py-1.5 text-right font-bold">NT${item.subtotal}</td>
-            </tr>
-          ))
-        )}
-      </tbody>
-      {block.isLastSegment && (
-        <tfoot>
-          <tr>
-            <td colSpan={5} className="px-2 py-3 text-right text-sm font-bold">總計：</td>
-            <td className="px-2 py-3 text-right text-lg font-bold text-primary-blue print:text-ink">NT${block.totalAmount}</td>
-          </tr>
-        </tfoot>
-      )}
-    </table>
-  </section>
-);
-
 const PrintPreview = ({ 
   customers, 
   orders, 
@@ -3861,17 +3192,13 @@ const PrintPreview = ({
     else setSelectedIds([...selectedIds, id]);
   };
 
-  const selectedCustomers = customers.filter(c => selectedIds.includes(c.id));
-  const printPages = buildPrintPages(selectedCustomers, orders);
-
   return (
     <div className="space-y-6 pb-24">
       <div className="flex items-center justify-between bg-card-white p-4 rounded-2xl card-shadow">
         <h2 className="text-xl font-bold text-ink">列印預覽</h2>
         <button 
           onClick={() => handlePrint()}
-          disabled={selectedIds.length === 0}
-          className="px-6 py-2 bg-primary-blue text-white rounded-xl font-bold flex items-center gap-2 disabled:opacity-40"
+          className="px-6 py-2 bg-primary-blue text-white rounded-xl font-bold flex items-center gap-2"
         >
           <Printer className="w-4 h-4" /> 列印所選 ({selectedIds.length})
         </button>
@@ -3903,7 +3230,7 @@ const PrintPreview = ({
         </div>
 
         <div className="hidden lg:block w-full lg:w-2/3 bg-ink/5 rounded-3xl p-4 sm:p-8 overflow-y-auto max-h-[70vh]">
-          <div ref={printRef} className="space-y-6 print:space-y-0">
+          <div ref={printRef} className="bg-white w-[210mm] min-h-[297mm] mx-auto p-12 shadow-2xl print:shadow-none print:m-0 print:w-full print:p-0">
             <style>{`
               @media print {
                 @page {
@@ -3913,6 +3240,15 @@ const PrintPreview = ({
                 body {
                   -webkit-print-color-adjust: exact;
                 }
+                .customer-section {
+                  break-inside: avoid;
+                  margin-bottom: 2rem;
+                  padding-bottom: 2rem;
+                  border-bottom: 1px dashed #ccc;
+                }
+                .customer-section.long-order {
+                  break-inside: auto;
+                }
                 table {
                   width: 100%;
                   border-collapse: collapse;
@@ -3921,58 +3257,106 @@ const PrintPreview = ({
                 thead {
                   display: table-header-group;
                 }
-                tr, .print-customer-block {
+                tr {
                   break-inside: avoid;
-                }
-                .print-page {
-                  width: 100%;
-                  min-height: 277mm;
-                  break-after: page;
-                  box-shadow: none !important;
-                  margin: 0 !important;
-                  padding: 0 !important;
-                }
-                .print-page:last-child {
-                  break-after: auto;
                 }
               }
             `}</style>
-            {printPages.length === 0 ? (
-              <div className="bg-white w-[210mm] min-h-[297mm] mx-auto p-10 shadow-2xl text-center text-ink/40">
-                請先選擇要列印的顧客
-              </div>
-            ) : (
-              printPages.map((page, pageIndex) => (
-                <div key={pageIndex} className="print-page bg-white w-[210mm] min-h-[297mm] mx-auto p-10 shadow-2xl">
-                  <div className="space-y-5">
-                    {page.blocks.map((block, blockIndex) => (
-                      <React.Fragment key={`${block.customer.id}-${pageIndex}-${blockIndex}`}>
-                        <PrintCustomerTable block={block} />
-                      </React.Fragment>
-                    ))}
+            <div className="space-y-8 print:space-y-0">
+              {customers.filter(c => selectedIds.includes(c.id)).map(customer => {
+                const custOrders = orders.filter(o => o.customerId === customer.id);
+                let allItems = custOrders.flatMap(o => o.items);
+                
+                // 依照商品的名稱排序 同樣的機台優先排在一起 然後時間由舊到新
+                allItems.sort((a, b) => {
+                  if (a.machineName === b.machineName) {
+                    const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+                    const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+                    return aTime - bTime;
+                  }
+                  return a.machineName.localeCompare(b.machineName, 'zh-Hant');
+                });
+                
+                const isLongOrder = allItems.length > 12;
+
+                return (
+                  <div 
+                    key={customer.id} 
+                    className={cn(
+                      "customer-section last:border-none print:pb-8",
+                      isLongOrder && "long-order"
+                    )}
+                  >
+                    <table className="w-full text-left">
+                      <thead>
+                        <tr className="print-header">
+                          <th colSpan={6} className="pb-4">
+                            <div className="text-center border-b-2 border-ink pb-4 mb-4">
+                              <h1 className="text-2xl font-bold text-ink">
+                                {customer.name} 扭蛋訂單明細
+                              </h1>
+                              <div className="flex justify-between items-center mt-2 text-[10px] font-bold text-ink/60">
+                                <span>列印日期：{format(toZonedTime(new Date(), TAIWAN_TZ), 'yyyy/MM/dd')}</span>
+                                <span>顧客：{customer.name}</span>
+                              </div>
+                            </div>
+                          </th>
+                        </tr>
+                        <tr className="border-b-2 border-ink text-sm bg-ink/5 print:bg-transparent">
+                          <th className="py-2 px-2 w-[8%] text-center"></th>
+                          <th className="py-2 px-2 w-[40%]">機台名稱</th>
+                          <th className="py-2 px-2 w-[22%]">款式</th>
+                          <th className="py-2 px-2 w-[10%]">單價</th>
+                          <th className="py-2 px-2 w-[8%]">數量</th>
+                          <th className="py-2 px-2 w-[12%] text-right">小計</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {allItems.map((item, idx) => (
+                          <tr key={idx} className="border-b border-divider text-sm print:border-ink/10">
+                            <td className="py-2 px-2 text-center align-middle">
+                              <div className="w-4 h-4 border-2 border-ink/40 rounded-sm mx-auto print:border-black"></div>
+                            </td>
+                            <td className="py-2 px-2">
+                              <div className="font-medium">{item.machineName}</div>
+                              <div className="text-[10px] text-ink/30 print:text-ink/50">{formatDateTime(item.createdAt)}</div>
+                            </td>
+                            <td className="py-2 px-2">{item.variant || '-'}</td>
+                            <td className="py-2 px-2">NT${item.price}</td>
+                            <td className="py-2 px-2">{item.quantity}</td>
+                            <td className="py-2 px-2 text-right font-bold">NT${item.subtotal}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr>
+                          <td colSpan={5} className="py-4 text-right font-bold text-sm">總計金額：</td>
+                          <td className="py-4 text-right font-bold text-xl text-primary-blue print:text-ink">NT${customer.totalSpent}</td>
+                        </tr>
+                      </tfoot>
+                    </table>
                   </div>
-                </div>
-              ))
-            )}
+                );
+              })}
+            </div>
           </div>
         </div>
       </div>
     </div>
   );
 };
+
 const Dashboard = ({ 
   orders, 
   customers, 
   machines,
   releases, 
-  settings,
   showToast 
 }: { 
   orders: Order[], 
   customers: Customer[], 
   machines: any[],
   releases: any[], 
-  settings: SystemSettings | null,
   showToast: (m: string, t?: 'success' | 'error') => void 
 }) => {
   const [startDate, setStartDate] = useState<string>('');
@@ -4002,27 +3386,15 @@ const Dashboard = ({
     ? new Set(filteredOrders.map(o => o.customerId)).size
     : customers.length;
 
-  const totalJpySpent = filteredOrders.reduce((sum, o) => sum + o.items.reduce((s, i) => {
-    const baseTwdPrice = i.price - (i.variant?.includes('(環保)') ? 10 : 0);
-    const currentPriceMap = settings?.priceMap || DEFAULT_PRICE_MAP;
-    const jpyPriceStr = Object.keys(currentPriceMap).find(key => currentPriceMap[parseInt(key)] === baseTwdPrice);
-    const jpyPrice = jpyPriceStr ? parseInt(jpyPriceStr) : 0;
-    return s + (jpyPrice * i.quantity);
-  }, 0), 0);
-
   const pendingReleases = releases.filter(r => r.status === 'pending');
 
   const [transferringRelease, setTransferringRelease] = useState<any | null>(null);
   const [targetCustomerName, setTargetCustomerName] = useState('');
 
   const handleReleaseTransfer = async () => {
-    if (!transferringRelease) return;
-    const trimmedTarget = targetCustomerName.replace(/\s+/g, '');
-    if (!trimmedTarget) {
-      showToast('請輸入目標顧客名稱', 'error');
-      return;
-    }
+    if (!transferringRelease || !targetCustomerName.replace(/\s+/g, '')) return;
     const release = transferringRelease;
+    const trimmedTarget = targetCustomerName.replace(/\s+/g, '');
 
     if (trimmedTarget === release.customerName.replace(/\s+/g, '')) {
       showToast('不能轉讓給原顧客自己！', 'error');
@@ -4030,8 +3402,6 @@ const Dashboard = ({
     }
 
     try {
-      const batch = writeBatch(db);
-
       // 1. Find or create target customer
       let targetCust = customers.find(c => c.name.replace(/\s+/g, '') === trimmedTarget);
       let targetId = targetCust?.id;
@@ -4045,12 +3415,13 @@ const Dashboard = ({
           createdAt: new Date().toISOString(),
           lastOrderAt: new Date().toISOString()
         };
-        batch.set(newCustRef, newCust);
+        await setDoc(newCustRef, newCust);
         targetId = newCustRef.id;
+        targetCust = { id: targetId, ...newCust } as Customer;
       }
 
       // 2. Update release status
-      batch.update(dbDoc('releases', release.id), { status: 'completed' });
+      await updateDoc(dbDoc('releases', release.id), { status: 'completed' });
       
       // 3. Update the original order item and customer
       const orderRef = dbDoc('orders', release.orderId);
@@ -4059,56 +3430,38 @@ const Dashboard = ({
       
       if (orderSnap.exists()) {
         const orderData = orderSnap.data() as Order;
-        const rawIds = release.rawIds || [release.itemId];
-        
-        const oldItems = orderData.items.filter(i => rawIds.includes(i.id));
-        const oldQty = oldItems.reduce((sum, i) => sum + i.quantity, 0);
-        const oldSubtotal = oldItems.reduce((sum, i) => sum + i.subtotal, 0);
-
-        const transferQuantity = release.quantity;
-        const transferSubtotal = transferQuantity * release.price;
-        
-        if (oldItems.length > 0) {
-          itemToTransfer = {
-            id: rawIds[0],
-            machineName: release.machineName,
-            variant: release.variant,
-            price: release.price,
-            quantity: transferQuantity,
-            subtotal: transferSubtotal
-          };
-
-          let newItems = orderData.items.filter(i => !rawIds.includes(i.id));
-
-          if (transferQuantity < oldQty) {
-            const remainingItem = {
-              ...oldItems[0],
-              id: rawIds[0],
-              quantity: oldQty - transferQuantity,
-              subtotal: oldSubtotal - transferSubtotal
+        const updatedItems = orderData.items.map(item => {
+          if (item.id === release.itemId) {
+            itemToTransfer = { ...item, quantity: release.quantity, subtotal: release.quantity * item.price };
+            const newQty = Math.max(0, item.quantity - release.quantity);
+            return {
+              ...item,
+              quantity: newQty,
+              subtotal: newQty * item.price,
+              isReleased: newQty === 0
             };
-            // @ts-ignore
-            delete remainingItem.rawIds;
-            newItems.push(remainingItem);
           }
-          
-          const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
-          
-          if (newItems.length === 0) {
-            batch.delete(orderRef);
-          } else {
-            batch.update(orderRef, {
-              items: newItems,
-              totalAmount: newTotal,
-              updatedAt: new Date().toISOString()
-            });
-          }
+          return item;
+        }).filter(item => item.quantity > 0);
+        
+        const newTotal = updatedItems.reduce((sum, i) => sum + i.subtotal, 0);
+        
+        if (updatedItems.length === 0) {
+          await deleteDoc(orderRef);
+        } else {
+          await updateDoc(orderRef, {
+            items: updatedItems,
+            totalAmount: newTotal,
+            updatedAt: new Date().toISOString()
+          });
+        }
 
-          // Update original customer's totalSpent and totalItems
-          batch.set(dbDoc('customers', orderData.customerId), {
+        // Update original customer's totalSpent and totalItems
+        if (itemToTransfer) {
+          await updateDoc(dbDoc('customers', orderData.customerId), {
             totalSpent: increment(-itemToTransfer.subtotal),
             totalItems: increment(-itemToTransfer.quantity)
-          }, { merge: true });
+          });
         }
       }
 
@@ -4125,16 +3478,14 @@ const Dashboard = ({
         if (targetOrder) {
           const updatedItems = [...targetOrder.items, { ...transferredItem, createdAt: now }];
 
-          batch.update(dbDoc('orders', targetOrder.id), {
+          await updateDoc(dbDoc('orders', targetOrder.id), {
             items: updatedItems,
             totalAmount: targetOrder.totalAmount + transferredItem.subtotal,
             updatedAt: now
           });
         } else {
-          const newOrderRef = dbDoc('orders');
-          batch.set(newOrderRef, {
-            id: newOrderRef.id,
-            customerId: targetId!,
+          await setDoc(dbDoc('orders'), {
+            customerId: targetId,
             customerName: trimmedTarget,
             items: [{ ...transferredItem, createdAt: now }],
             totalAmount: transferredItem.subtotal,
@@ -4143,25 +3494,17 @@ const Dashboard = ({
             updatedAt: now
           });
         }
-        batch.set(dbDoc('customers', targetId!), {
+        await updateDoc(dbDoc('customers', targetId!), {
           totalSpent: increment(transferredItem.subtotal),
           totalItems: increment(transferredItem.quantity),
           lastOrderAt: new Date().toISOString()
-        }, { merge: true });
+        });
       }
 
       showToast('釋出轉移成功！');
       setTransferringRelease(null);
       setTargetCustomerName('');
-      await batch.commit();
-    } catch (err: any) {
-      if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-        showToast('轉移失敗：資料庫免費額度已滿', 'error');
-      } else {
-        showToast('轉移失敗', 'error');
-      }
-      setTransferringRelease(null);
-      setTargetCustomerName('');
+    } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `releases/${release.id}`);
     }
   };
@@ -4199,14 +3542,10 @@ const Dashboard = ({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="bg-orange-400 p-6 rounded-3xl text-white card-shadow">
           <p className="text-xs font-bold opacity-60 uppercase tracking-widest mb-1">預估營收</p>
           <p className="text-3xl font-bold">NT${totalRevenue}</p>
-        </div>
-        <div className="bg-red-400 p-6 rounded-3xl text-white card-shadow">
-          <p className="text-xs font-bold opacity-60 uppercase tracking-widest mb-1">日幣總花費</p>
-          <p className="text-3xl font-bold">¥{totalJpySpent}</p>
         </div>
         <div className="bg-ink/40 p-6 rounded-3xl text-white card-shadow">
           <p className="text-xs font-bold opacity-60 uppercase tracking-widest mb-1">總顆數</p>
@@ -4323,36 +3662,17 @@ const SettingsView = ({
   settings, 
   onLogout,
   showToast,
-  setConfirmModal,
-  exportData,
-  importData,
-  importPreview,
-  confirmImport,
-  clearImportPreview,
-  importInProgress
+  setConfirmModal
 }: { 
   settings: SystemSettings | null, 
   onLogout: () => void,
   showToast: (m: string, t?: 'success' | 'error') => void,
-  setConfirmModal: (m: any) => void,
-  exportData: () => void,
-  importData: (e: React.ChangeEvent<HTMLInputElement>) => void,
-  importPreview: PreparedImport | null,
-  confirmImport: () => void,
-  clearImportPreview: () => void,
-  importInProgress: boolean
+  setConfirmModal: (m: any) => void
 }) => {
   const [template, setTemplate] = useState(settings?.notificationTemplate || '');
   const [priceMap, setPriceMap] = useState<Record<number, any>>(settings?.priceMap || DEFAULT_PRICE_MAP);
   const [newJpy, setNewJpy] = useState('');
   const [newTwd, setNewTwd] = useState('');
-
-  useEffect(() => {
-    if (settings) {
-      setTemplate(settings.notificationTemplate || '');
-      setPriceMap(settings.priceMap || DEFAULT_PRICE_MAP);
-    }
-  }, [settings]);
 
   const saveSettings = async () => {
     try {
@@ -4362,11 +3682,11 @@ const SettingsView = ({
         if (!isNaN(numV)) cleanedPriceMap[parseInt(k)] = numV;
       });
 
-      showToast('設定已儲存');
-      await setDoc(dbDoc('settings', 'global'), {
+      await updateDoc(dbDoc('settings', 'global'), {
         notificationTemplate: template,
         priceMap: cleanedPriceMap
-      }, { merge: true });
+      });
+      showToast('設定已儲存');
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'settings/global');
     }
@@ -4398,25 +3718,11 @@ const SettingsView = ({
           const collections = ['orders', 'machines', 'customers'];
           for (const colName of collections) {
             const snapshot = await getDocs(collection(db, colName));
-            let currentPromises: Promise<void>[] = [];
-            for (const doc of snapshot.docs) {
-              currentPromises.push(deleteDoc(doc.ref));
-              if (currentPromises.length >= 100) {
-                await Promise.all(currentPromises);
-                currentPromises = [];
-              }
-            }
-            if (currentPromises.length > 0) {
-              await Promise.all(currentPromises);
-            }
+            const deletePromises = snapshot.docs.map(d => deleteDoc(d.ref));
+            await Promise.all(deletePromises);
           }
           showToast('全部資料已清除');
-        } catch (err: any) {
-          if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-            showToast('清除失敗：資料庫免費額度已滿', 'error');
-          } else {
-            showToast('清除失敗', 'error');
-          }
+        } catch (err) {
           handleFirestoreError(err, OperationType.DELETE, 'multiple_collections');
         }
       }
@@ -4426,17 +3732,13 @@ const SettingsView = ({
   return (
     <div className="space-y-6 pb-20">
       <div className="bg-card-white p-6 rounded-3xl card-shadow">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest flex items-center gap-2">
-            <MessageSquare className="w-4 h-4" /> 通知範本設定
-          </h3>
-          <button onClick={saveSettings} className="px-3 py-1 bg-primary-blue text-white rounded-lg text-sm font-bold shadow-sm">儲存</button>
-        </div>
+        <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest mb-4 flex items-center gap-2">
+          <MessageSquare className="w-4 h-4" /> 通知範本設定
+        </h3>
         <textarea 
           className="w-full h-40 p-4 bg-background rounded-2xl border-none focus:ring-2 focus:ring-primary-blue text-sm font-medium leading-relaxed"
           value={template}
           onChange={(e) => setTemplate(e.target.value)}
-          onBlur={saveSettings}
           placeholder="輸入通知範本..."
         />
         <div className="mt-4 p-4 bg-background rounded-xl">
@@ -4509,16 +3811,14 @@ const SettingsView = ({
       <div className="bg-card-white p-6 rounded-3xl card-shadow">
         <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest mb-4">系統維護</h3>
         <div className="grid grid-cols-2 gap-3">
-          <button onClick={exportData} className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors">
+          <button className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors">
             <Download className="w-5 h-5" />
             <span className="text-[10px] font-bold">匯出資料</span>
           </button>
-          
-          <label className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors cursor-pointer">
+          <button className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors">
             <Upload className="w-5 h-5" />
             <span className="text-[10px] font-bold">匯入資料</span>
-            <input type="file" accept=".json" className="hidden" onChange={importData} />
-          </label>
+          </button>
           <button 
             onClick={clearAllData}
             className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-red-500/60 hover:bg-red-500/5 transition-colors"
@@ -4534,45 +3834,6 @@ const SettingsView = ({
             <span className="text-[10px] font-bold">登出系統</span>
           </button>
         </div>
-        {importPreview && (
-          <div className="mt-4 rounded-2xl bg-background p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="break-all text-sm font-bold text-ink">{importPreview.fileName}</p>
-                <p className="mt-1 text-xs text-ink/50">{formatFileSize(importPreview.fileSize)}</p>
-              </div>
-              <button
-                onClick={clearImportPreview}
-                className="rounded-xl bg-card-white px-3 py-2 text-xs font-bold text-ink/60"
-              >
-                清除
-              </button>
-            </div>
-            <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-5">
-              <div className="rounded-xl bg-card-white p-3"><p className="text-[10px] font-bold text-ink/40">顧客</p><p className="text-sm font-bold text-ink">{importPreview.counts.customers}</p></div>
-              <div className="rounded-xl bg-card-white p-3"><p className="text-[10px] font-bold text-ink/40">訂單</p><p className="text-sm font-bold text-ink">{importPreview.counts.orders}</p></div>
-              <div className="rounded-xl bg-card-white p-3"><p className="text-[10px] font-bold text-ink/40">機台</p><p className="text-sm font-bold text-ink">{importPreview.counts.machines}</p></div>
-              <div className="rounded-xl bg-card-white p-3"><p className="text-[10px] font-bold text-ink/40">釋出</p><p className="text-sm font-bold text-ink">{importPreview.counts.releases}</p></div>
-              <div className="rounded-xl bg-card-white p-3"><p className="text-[10px] font-bold text-ink/40">圖片</p><p className="text-sm font-bold text-ink">{importPreview.counts.images}</p></div>
-            </div>
-            {importPreview.warnings.length > 0 && (
-              <div className="mt-4 space-y-2">
-                {importPreview.warnings.map((warning) => (
-                  <div key={warning} className="rounded-xl bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">
-                    {warning}
-                  </div>
-                ))}
-              </div>
-            )}
-            <button
-              onClick={confirmImport}
-              disabled={importInProgress}
-              className="mt-4 w-full rounded-2xl bg-primary-blue py-4 font-bold text-white shadow-lg shadow-primary-blue/20 disabled:opacity-60"
-            >
-              {importInProgress ? '匯入中...' : '開始匯入'}
-            </button>
-          </div>
-        )}
       </div>
     </div>
   );
@@ -4599,12 +3860,9 @@ export default function App() {
   const [machines, setMachines] = useState<any[]>([]);
   const [releases, setReleases] = useState<any[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
-  const [importPreview, setImportPreview] = useState<PreparedImport | null>(null);
-  const [importInProgress, setImportInProgress] = useState(false);
   
   // UI State
   const [isPrinting, setIsPrinting] = useState(false);
-
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [confirmModal, setConfirmModal] = useState<{
     show: boolean;
@@ -4705,13 +3963,7 @@ export default function App() {
       await batch.commit();
       showToast(syncWithOrders ? '機台設定與訂單已同步更新' : '機台設定已儲存');
       setEditingMachine(null);
-    } catch (err: any) {
-      if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-        showToast('儲存失敗：資料庫免費額度已滿', 'error');
-      } else {
-        showToast('儲存失敗', 'error');
-      }
-      setEditingMachine(null);
+    } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, 'machines_sync');
     }
   };
@@ -4767,13 +4019,7 @@ export default function App() {
           await batch.commit();
           showToast('機台已刪除');
           setEditingMachine(null);
-        } catch (err: any) {
-          if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-            showToast('刪除失敗：資料庫免費額度已滿', 'error');
-          } else {
-            showToast('刪除失敗', 'error');
-          }
-          setEditingMachine(null);
+        } catch (err) {
           handleFirestoreError(err, OperationType.DELETE, `machines/${machineId}`);
         }
       }
@@ -4787,12 +4033,10 @@ export default function App() {
     }
   }, [customers]);
 
-  const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
-    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     setToast({ show: true, message, type });
-    toastTimeoutRef.current = setTimeout(() => setToast(t => ({ ...t, show: false })), 3000);
-  }, []);
+    setTimeout(() => setToast(t => ({ ...t, show: false })), 3000);
+  };
 
   // --- Auth & Data Sync ---
   useEffect(() => {
@@ -4806,25 +4050,37 @@ export default function App() {
   useEffect(() => {
     if (!user) return;
 
+    // Test connection
+    const testConnection = async () => {
+      try {
+        await getDocFromServer(dbDoc('settings', 'connection_test'));
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('the client is offline')) {
+          console.error("Please check your Firebase configuration.");
+        }
+      }
+    };
+    testConnection();
+
     const unsubCustomers = onSnapshot(query(col('customers'), orderBy('createdAt', 'desc')), (snap) => {
-      setCustomers(snap.docs.map(d => normalizeCustomer(d.id, d.data())));
+      setCustomers(snap.docs.map(d => ({ id: d.id, ...d.data() } as Customer)));
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'customers'));
 
     const unsubOrders = onSnapshot(query(col('orders'), orderBy('createdAt', 'desc')), (snap) => {
-      setOrders(snap.docs.map(d => normalizeOrder(d.id, d.data())));
+      setOrders(snap.docs.map(d => ({ id: d.id, ...d.data() } as Order)));
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'orders'));
 
     const unsubMachines = onSnapshot(query(col('machines'), orderBy('name', 'asc')), (snap) => {
-      setMachines(snap.docs.map(d => normalizeMachine(d.id, d.data())));
+      setMachines(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'machines'));
 
     const unsubReleases = onSnapshot(query(col('releases'), orderBy('createdAt', 'desc')), (snap) => {
-      setReleases(snap.docs.map(d => normalizeRelease(d.id, d.data())));
+      setReleases(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'releases'));
 
     const unsubSettings = onSnapshot(dbDoc('settings', 'global'), (snap) => {
       if (snap.exists()) {
-        setSettings(normalizeSettings(snap.id, snap.data()));
+        setSettings({ id: snap.id, ...snap.data() } as SystemSettings);
       } else {
         // Initialize default settings
         const defaultSettings: Omit<SystemSettings, 'id'> = {
@@ -4889,16 +4145,16 @@ export default function App() {
     
     const itemsText = allItems.map(i => `${i.machineName} ${i.variant ? `(${i.variant})` : ''} x ${i.quantity} $${i.subtotal}`).join('\n');
     
-    let text = settings.notificationTemplate || '';
-    if (text && (text.includes('{customerName}') || text.includes('{items}') || text.includes('{totalAmount}'))) {
-      text = text.replace(/{customerName}/g, customer.name);
-      text = text.replace(/{items}/g, itemsText);
-      text = text.replace(/{totalAmount}/g, customer.totalSpent.toLocaleString());
-      text = text.replace(/{orderId}/g, customerOrders.map(o => o.id).join(', '));
-    } else {
-      const upperPart = `親愛的 ${customer.name} 您好，\n您本次的連線購物明細如下：\n\n${itemsText}\n----------------\n消費總額：$${customer.totalSpent.toLocaleString()}`;
-      text = text ? `${upperPart}\n\n${text}` : upperPart;
-    }
+    const upperPart = `親愛的 ${customer.name} 您好，
+您本次的連線購物明細如下：
+
+${itemsText}
+----------------
+消費總額：$${customer.totalSpent.toLocaleString()}`;
+
+    const text = `${upperPart}
+
+${settings.notificationTemplate}`;
     
     navigator.clipboard.writeText(text);
     showToast('已複製通知文字！');
@@ -4910,23 +4166,23 @@ export default function App() {
     const groupedItems = groupItemsHelper(order.items);
     const itemsText = groupedItems.map(i => `${i.machineName} ${i.variant ? `(${i.variant})` : ''} x ${i.quantity} $${i.subtotal}`).join('\n');
     
-    let text = settings.notificationTemplate || '';
-    if (text && (text.includes('{customerName}') || text.includes('{items}') || text.includes('{totalAmount}'))) {
-      text = text.replace(/{customerName}/g, order.customerName);
-      text = text.replace(/{items}/g, itemsText);
-      text = text.replace(/{totalAmount}/g, order.totalAmount.toLocaleString());
-      text = text.replace(/{orderId}/g, order.id);
-    } else {
-      const upperPart = `親愛的 ${order.customerName} 您好，\n您本次的連線購物明細如下：\n\n${itemsText}\n----------------\n消費總額：$${order.totalAmount.toLocaleString()}`;
-      text = text ? `${upperPart}\n\n${text}` : upperPart;
-    }
+    const upperPart = `親愛的 ${order.customerName} 您好，
+您本次的連線購物明細如下：
+
+${itemsText}
+----------------
+消費總額：$${order.totalAmount.toLocaleString()}`;
+
+    const text = `${upperPart}
+
+${settings.notificationTemplate}`;
     
     navigator.clipboard.writeText(text);
     showToast('已複製通知文字！');
   };
 
   const exportData = () => {
-    const data = { customers, orders, settings, machines, releases, exportedAt: new Date().toISOString() };
+    const data = { customers, orders, settings, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -4935,87 +4191,54 @@ export default function App() {
     a.click();
   };
 
-  const applyPreparedImport = async (prepared: PreparedImport) => {
-    try {
-      setImportInProgress(true);
-      let currentBatch = writeBatch(db);
-      let operationCount = 0;
-
-      const checkBatchLimit = async () => {
-        if (operationCount >= 400) {
-          await currentBatch.commit();
-          currentBatch = writeBatch(db);
-          operationCount = 0;
-        }
-      };
-
-      for (const { key, path } of IMPORT_COLLECTIONS) {
-        for (const item of prepared.payload[key]) {
-          const { id, ...rest } = item;
-          currentBatch.set(dbDoc(path, id), rest);
-          operationCount++;
-          await checkBatchLimit();
-        }
-      }
-
-      if (prepared.payload.settings) {
-        currentBatch.set(dbDoc('settings', 'global'), prepared.payload.settings);
-        operationCount++;
-        await checkBatchLimit();
-      }
-
-      if (operationCount > 0) {
-        await currentBatch.commit();
-      }
-
-      setCustomers(prepared.payload.customers);
-      setOrders(prepared.payload.orders);
-      setMachines(prepared.payload.machines);
-      setReleases(prepared.payload.releases);
-      if (prepared.payload.settings) {
-        setSettings({ id: 'global', ...prepared.payload.settings });
-      }
-      setImportPreview(null);
-      showToast('備份資料已匯入');
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.toLowerCase().includes('quota')) {
-        showToast('匯入失敗：瀏覽器本地儲存空間不足', 'error');
-      } else {
-        showToast(`匯入失敗：${message}`, 'error');
-      }
-      handleFirestoreError(err, OperationType.WRITE, 'batch_import');
-    } finally {
-      setImportInProgress(false);
-    }
-  };
-
   const importData = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    e.target.value = '';
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       try {
         const data = JSON.parse(event.target?.result as string);
-        const prepared = prepareImportPayload(data, file.name, file.size);
-        setImportPreview(prepared);
-        showToast('備份檔已讀取，請確認後開始匯入');
+        setConfirmModal({
+          show: true,
+          title: '還原資料',
+          message: '確定要還原資料嗎？這將覆蓋現有資料！',
+          type: 'danger',
+          onConfirm: async () => {
+            try {
+              const batch = writeBatch(db);
+              
+              // Import customers
+              data.customers.forEach((c: any) => {
+                const { id, ...rest } = c;
+                batch.set(dbDoc('customers', id), rest);
+              });
+              
+              // Import orders
+              data.orders.forEach((o: any) => {
+                const { id, ...rest } = o;
+                batch.set(dbDoc('orders', id), rest);
+              });
+              
+              // Import settings
+              if (data.settings) {
+                const { id, ...rest } = data.settings;
+                batch.set(dbDoc('settings', 'global'), rest);
+              }
+              
+              await batch.commit();
+              showToast('資料還原成功！');
+            } catch (err) {
+              handleFirestoreError(err, OperationType.WRITE, 'batch_import');
+            }
+          }
+        });
       } catch (err) {
-        console.error(err);
-        showToast('備份檔格式不正確', 'error');
+        showToast('資料格式錯誤！', 'error');
       }
     };
     reader.readAsText(file);
   };
-
-  const confirmImport = () => {
-    if (!importPreview) return;
-    applyPreparedImport(importPreview);
-  };
-
-  const clearImportPreview = () => setImportPreview(null);
 
   const clearData = async () => {
     setConfirmModal({
@@ -5025,39 +4248,12 @@ export default function App() {
       type: 'danger',
       onConfirm: async () => {
         try {
-          let currentBatch = writeBatch(db);
-          let operationCount = 0;
-
-          const checkBatchLimit = async () => {
-            if (operationCount >= 400) {
-              await currentBatch.commit();
-              currentBatch = writeBatch(db);
-              operationCount = 0;
-            }
-          };
-
-          for (const c of customers) {
-            currentBatch.delete(dbDoc('customers', c.id));
-            operationCount++;
-            await checkBatchLimit();
-          }
-          
-          for (const o of orders) {
-            currentBatch.delete(dbDoc('orders', o.id));
-            operationCount++;
-            await checkBatchLimit();
-          }
-          
-          if (operationCount > 0) {
-            await currentBatch.commit();
-          }
+          const batch = writeBatch(db);
+          customers.forEach(c => batch.delete(dbDoc('customers', c.id)));
+          orders.forEach(o => batch.delete(dbDoc('orders', o.id)));
+          await batch.commit();
           showToast('資料已清空。');
-        } catch (err: any) {
-          if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-            showToast('清空失敗：資料庫免費額度已滿', 'error');
-          } else {
-            showToast('清空失敗', 'error');
-          }
+        } catch (err) {
           handleFirestoreError(err, OperationType.DELETE, 'batch_clear');
         }
       }
@@ -5072,7 +4268,7 @@ export default function App() {
 
   return (
     <ErrorBoundary>
-      <div className="min-h-[100dvh] pb-24 lg:pb-0">
+      <div className="min-h-screen pb-24">
         <Header user={user} activeTab={activeTab} />
         
         <main className="max-w-4xl mx-auto px-6 py-8">
@@ -5137,7 +4333,6 @@ export default function App() {
                   customers={customers} 
                   machines={machines}
                   releases={releases}
-                  settings={settings}
                   showToast={showToast}
                 />
               )}
@@ -5147,12 +4342,6 @@ export default function App() {
                   onLogout={() => signOut(auth)}
                   showToast={showToast}
                   setConfirmModal={setConfirmModal}
-                  exportData={exportData}
-                  importData={importData}
-                  importPreview={importPreview}
-                  confirmImport={confirmImport}
-                  clearImportPreview={clearImportPreview}
-                  importInProgress={importInProgress}
                 />
               )}
             </motion.div>
@@ -5197,14 +4386,11 @@ export default function App() {
               onSave={handleSaveEditedMachine}
               onDelete={handleDeleteMachine}
               orders={orders}
-              customers={customers}
               settings={settings}
               showToast={showToast}
-              setConfirmModal={setConfirmModal}
             />
           )}
         </AnimatePresence>
-
 
         {/* Confirmation Modal */}
         <AnimatePresence>
@@ -5267,7 +4453,7 @@ export default function App() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 50 }}
               className={cn(
-                "fixed bottom-28 left-1/2 -translate-x-1/2 z-[9999] px-6 py-3 rounded-full font-bold text-white shadow-xl flex items-center gap-2",
+                "fixed bottom-28 left-1/2 -translate-x-1/2 z-[130] px-6 py-3 rounded-full font-bold text-white shadow-xl flex items-center gap-2",
                 toast.type === 'success' ? "bg-green-500" : "bg-red-500"
               )}
             >
@@ -5329,4 +4515,3 @@ export default function App() {
     </ErrorBoundary>
   );
 }
-
