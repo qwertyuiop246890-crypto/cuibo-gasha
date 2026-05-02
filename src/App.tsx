@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
-  signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut, User
+  signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User
 } from './mockAuth';
 import { GoogleGenAI, Type } from '@google/genai';
 import { 
@@ -284,7 +284,8 @@ const normalizeSettings = (id: string, data: any): SystemSettings => ({
   ...data,
   notificationTemplate: typeof data?.notificationTemplate === 'string' ? data.notificationTemplate : DEFAULT_NOTIFICATION_TEMPLATE,
   priceMap: data?.priceMap && typeof data.priceMap === 'object' && !Array.isArray(data.priceMap) ? data.priceMap : DEFAULT_PRICE_MAP,
-  lastBackupAt: typeof data?.lastBackupAt === 'string' ? data.lastBackupAt : new Date().toISOString()
+  lastBackupAt: typeof data?.lastBackupAt === 'string' ? data.lastBackupAt : new Date().toISOString(),
+  lastDriveBackupAt: optionalIsoString(data?.lastDriveBackupAt)
 });
 
 const IMPORT_COLLECTIONS = [
@@ -308,6 +309,41 @@ type PreparedImport = {
     releases: any[];
     settings: Omit<SystemSettings, 'id'> | null;
   };
+};
+
+type BackupPayload = {
+  customers: Customer[];
+  orders: Order[];
+  settings: SystemSettings | null;
+  machines: any[];
+  releases: any[];
+  exportedAt: string;
+  backupMeta: {
+    app: 'cuibo-gasha';
+    backupVersion: 1;
+    deviceId: string;
+    dataHash: string;
+    counts: BackupCounts;
+  };
+};
+
+type BackupCounts = Record<ImportCollectionKey, number> & { images: number; totalRecords: number };
+
+type DriveBackupFile = {
+  id: string;
+  name: string;
+  createdTime?: string;
+  modifiedTime?: string;
+  size?: string;
+  appProperties?: Record<string, string>;
+};
+
+type DriveBackupStatus = {
+  connected: boolean;
+  loading: boolean;
+  latest: DriveBackupFile | null;
+  files: DriveBackupFile[];
+  message: string;
 };
 
 const formatFileSize = (size: number) => {
@@ -403,6 +439,203 @@ const prepareImportPayload = (raw: any, fileName: string, fileSize: number): Pre
       settings: normalizedSettings
     }
   };
+};
+
+const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
+const GOOGLE_CLIENT_ID = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID as string | undefined;
+
+declare global {
+  interface Window {
+    google?: any;
+  }
+}
+
+const getDeviceId = () => {
+  const storageKey = 'cuibo_gasha_device_id';
+  const existing = localStorage.getItem(storageKey);
+  if (existing) return existing;
+  const next = crypto.randomUUID();
+  localStorage.setItem(storageKey, next);
+  return next;
+};
+
+const getBackupCounts = (
+  customers: Customer[],
+  orders: Order[],
+  machines: any[],
+  releases: any[]
+): BackupCounts => {
+  const images = machines.filter(machine => typeof machine?.imageUrl === 'string' && machine.imageUrl.trim()).length;
+  return {
+    customers: customers.length,
+    orders: orders.length,
+    machines: machines.length,
+    releases: releases.length,
+    images,
+    totalRecords: customers.length + orders.length + machines.length + releases.length
+  };
+};
+
+const sortById = <T extends { id: string }>(items: T[]) => [...items].sort((a, b) => a.id.localeCompare(b.id));
+
+const buildHashInput = (payload: Omit<BackupPayload, 'backupMeta'>) => JSON.stringify({
+  customers: sortById(payload.customers),
+  orders: sortById(payload.orders),
+  machines: sortById(payload.machines),
+  releases: sortById(payload.releases),
+  settings: payload.settings
+});
+
+const sha256 = async (text: string) => {
+  const bytes = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, '0')).join('');
+};
+
+const parseCounts = (file: DriveBackupFile | null): BackupCounts | null => {
+  if (!file?.appProperties?.counts) return null;
+  try {
+    const counts = JSON.parse(file.appProperties.counts);
+    return {
+      customers: Number(counts.customers) || 0,
+      orders: Number(counts.orders) || 0,
+      machines: Number(counts.machines) || 0,
+      releases: Number(counts.releases) || 0,
+      images: Number(counts.images) || 0,
+      totalRecords: Number(counts.totalRecords) || 0
+    };
+  } catch {
+    return null;
+  }
+};
+
+const loadGoogleIdentityScript = () => new Promise<void>((resolve, reject) => {
+  if (window.google?.accounts?.oauth2) {
+    resolve();
+    return;
+  }
+  const existing = document.querySelector<HTMLScriptElement>('script[data-google-identity]');
+  if (existing) {
+    existing.addEventListener('load', () => resolve(), { once: true });
+    existing.addEventListener('error', () => reject(new Error('Google Identity 載入失敗')), { once: true });
+    return;
+  }
+  const script = document.createElement('script');
+  script.src = 'https://accounts.google.com/gsi/client';
+  script.async = true;
+  script.defer = true;
+  script.dataset.googleIdentity = 'true';
+  script.onload = () => resolve();
+  script.onerror = () => reject(new Error('Google Identity 載入失敗'));
+  document.head.appendChild(script);
+});
+
+const requestGoogleDriveToken = async () => {
+  if (!GOOGLE_CLIENT_ID) {
+    throw new Error('尚未設定 VITE_GOOGLE_CLIENT_ID，請先建立 Google OAuth Client ID 後填入 Vercel 環境變數。');
+  }
+  await loadGoogleIdentityScript();
+
+  return new Promise<string>((resolve, reject) => {
+    const tokenClient = window.google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: GOOGLE_DRIVE_SCOPE,
+      prompt: '',
+      callback: (response: any) => {
+        if (response?.error) {
+          reject(new Error(response.error));
+          return;
+        }
+        if (!response?.access_token) {
+          reject(new Error('沒有取得 Google Drive 權杖'));
+          return;
+        }
+        resolve(response.access_token);
+      },
+      error_callback: (error: any) => reject(new Error(error?.message || 'Google 授權失敗'))
+    });
+    tokenClient.requestAccessToken();
+  });
+};
+
+const driveFetch = async (url: string, token: string, init: RequestInit = {}) => {
+  const response = await fetch(url, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(init.headers || {})
+    }
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Google Drive API 失敗 (${response.status})：${text}`);
+  }
+  return response;
+};
+
+const listDriveBackups = async (token: string): Promise<DriveBackupFile[]> => {
+  const params = new URLSearchParams({
+    spaces: 'appDataFolder',
+    q: "name contains 'cuibo-gasha-backup-' and trashed=false",
+    fields: 'files(id,name,createdTime,modifiedTime,size,appProperties)',
+    orderBy: 'createdTime desc',
+    pageSize: '20'
+  });
+  const response = await driveFetch(`https://www.googleapis.com/drive/v3/files?${params.toString()}`, token);
+  const data = await response.json();
+  return Array.isArray(data.files) ? data.files : [];
+};
+
+const uploadDriveBackup = async (token: string, payload: BackupPayload) => {
+  const fileBody = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const metadata = {
+    name: `cuibo-gasha-backup-${format(toZonedTime(new Date(), TAIWAN_TZ), 'yyyyMMdd-HHmmss')}.json`,
+    parents: ['appDataFolder'],
+    mimeType: 'application/json',
+    appProperties: {
+      app: payload.backupMeta.app,
+      backupVersion: String(payload.backupMeta.backupVersion),
+      deviceId: payload.backupMeta.deviceId,
+      dataHash: payload.backupMeta.dataHash,
+      counts: JSON.stringify(payload.backupMeta.counts)
+    }
+  };
+
+  const sessionResponse = await driveFetch(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,createdTime,modifiedTime,size,appProperties',
+    token,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json; charset=UTF-8',
+        'X-Upload-Content-Type': 'application/json',
+        'X-Upload-Content-Length': String(fileBody.size)
+      },
+      body: JSON.stringify(metadata)
+    }
+  );
+  const uploadUrl = sessionResponse.headers.get('Location');
+  if (!uploadUrl) {
+    throw new Error('Google Drive 沒有回傳上傳位置');
+  }
+
+  const response = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: fileBody
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Google Drive 上傳失敗 (${response.status})：${text}`);
+  }
+  return response.json() as Promise<DriveBackupFile>;
+};
+
+const downloadDriveBackup = async (token: string, fileId: string) => {
+  const response = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, token);
+  return response.json();
 };
 
 // --- Components ---
@@ -4828,7 +5061,6 @@ const Dashboard = ({
 
 const SettingsView = ({ 
   settings, 
-  onLogout,
   showToast,
   setConfirmModal,
   exportData,
@@ -4836,10 +5068,13 @@ const SettingsView = ({
   importPreview,
   confirmImport,
   clearImportPreview,
-  importInProgress
+  importInProgress,
+  driveStatus,
+  uploadDriveData,
+  downloadDriveData,
+  refreshDriveBackups
 }: { 
   settings: SystemSettings | null, 
-  onLogout: () => void,
   showToast: (m: string, t?: 'success' | 'error') => void,
   setConfirmModal: (m: any) => void,
   exportData: () => void,
@@ -4847,7 +5082,11 @@ const SettingsView = ({
   importPreview: PreparedImport | null,
   confirmImport: () => void,
   clearImportPreview: () => void,
-  importInProgress: boolean
+  importInProgress: boolean,
+  driveStatus: DriveBackupStatus,
+  uploadDriveData: (force?: boolean) => void,
+  downloadDriveData: () => void,
+  refreshDriveBackups: () => void
 }) => {
   const [template, setTemplate] = useState(settings?.notificationTemplate || '');
   const [priceMap, setPriceMap] = useState<Record<number, any>>(settings?.priceMap || DEFAULT_PRICE_MAP);
@@ -5034,13 +5273,6 @@ const SettingsView = ({
             <Database className="w-5 h-5" />
             <span className="text-[10px] font-bold">刪除全部資料</span>
           </button>
-          <button 
-            onClick={onLogout}
-            className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors"
-          >
-            <LogOut className="w-5 h-5" />
-            <span className="text-[10px] font-bold">登出系統</span>
-          </button>
         </div>
         {importPreview && (
           <div className="mt-4 rounded-2xl bg-background p-4">
@@ -5082,6 +5314,70 @@ const SettingsView = ({
           </div>
         )}
       </div>
+
+      <div className="bg-card-white p-6 rounded-3xl card-shadow">
+        <div className="flex items-start justify-between gap-3 mb-4">
+          <div>
+            <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest">Google Drive 備份</h3>
+            <p className="mt-1 text-xs font-medium text-ink/45">
+              上傳會建立新版本，不會覆蓋舊備份；下載會先讀取成匯入預覽，確認後才會覆蓋本地資料。
+            </p>
+          </div>
+          <button
+            onClick={refreshDriveBackups}
+            disabled={driveStatus.loading}
+            className="rounded-xl bg-background p-3 text-ink/50 hover:text-ink disabled:opacity-50"
+            title="重新讀取雲端備份"
+          >
+            <RefreshCw className={cn('w-4 h-4', driveStatus.loading && 'animate-spin')} />
+          </button>
+        </div>
+
+        {!GOOGLE_CLIENT_ID && (
+          <div className="mb-4 rounded-2xl bg-amber-50 p-4 text-xs font-medium leading-relaxed text-amber-800">
+            尚未設定 Google OAuth Client ID。請在 Vercel 環境變數加入 <code className="font-bold">VITE_GOOGLE_CLIENT_ID</code>，
+            並把目前網址加入 Google Cloud OAuth 的 Authorized JavaScript origins。
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            onClick={() => uploadDriveData(false)}
+            disabled={driveStatus.loading || !GOOGLE_CLIENT_ID}
+            className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors disabled:opacity-50"
+          >
+            <Upload className="w-5 h-5" />
+            <span className="text-[10px] font-bold">上傳雲端備份</span>
+          </button>
+          <button
+            onClick={downloadDriveData}
+            disabled={driveStatus.loading || !GOOGLE_CLIENT_ID}
+            className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors disabled:opacity-50"
+          >
+            <Download className="w-5 h-5" />
+            <span className="text-[10px] font-bold">下載雲端備份</span>
+          </button>
+        </div>
+
+        <div className="mt-4 rounded-2xl bg-background p-4">
+          <p className="text-[10px] font-bold text-ink/35 uppercase">雲端狀態</p>
+          <p className="mt-1 text-sm font-bold text-ink">
+            {driveStatus.loading ? '處理中...' : driveStatus.message}
+          </p>
+          {driveStatus.latest && (
+            <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-5">
+              <div className="rounded-xl bg-card-white p-3"><p className="text-[10px] font-bold text-ink/40">顧客</p><p className="text-sm font-bold text-ink">{parseCounts(driveStatus.latest)?.customers ?? '-'}</p></div>
+              <div className="rounded-xl bg-card-white p-3"><p className="text-[10px] font-bold text-ink/40">訂單</p><p className="text-sm font-bold text-ink">{parseCounts(driveStatus.latest)?.orders ?? '-'}</p></div>
+              <div className="rounded-xl bg-card-white p-3"><p className="text-[10px] font-bold text-ink/40">機台</p><p className="text-sm font-bold text-ink">{parseCounts(driveStatus.latest)?.machines ?? '-'}</p></div>
+              <div className="rounded-xl bg-card-white p-3"><p className="text-[10px] font-bold text-ink/40">釋出</p><p className="text-sm font-bold text-ink">{parseCounts(driveStatus.latest)?.releases ?? '-'}</p></div>
+              <div className="rounded-xl bg-card-white p-3"><p className="text-[10px] font-bold text-ink/40">圖片</p><p className="text-sm font-bold text-ink">{parseCounts(driveStatus.latest)?.images ?? '-'}</p></div>
+            </div>
+          )}
+          {driveStatus.latest?.createdTime && (
+            <p className="mt-3 text-xs font-medium text-ink/45">最新雲端備份：{formatDateTime(driveStatus.latest.createdTime)}</p>
+          )}
+        </div>
+      </div>
     </div>
   );
 };
@@ -5109,6 +5405,13 @@ export default function App() {
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [importPreview, setImportPreview] = useState<PreparedImport | null>(null);
   const [importInProgress, setImportInProgress] = useState(false);
+  const [driveStatus, setDriveStatus] = useState<DriveBackupStatus>({
+    connected: false,
+    loading: false,
+    latest: null,
+    files: [],
+    message: GOOGLE_CLIENT_ID ? '尚未連線 Google Drive' : '尚未設定 Google OAuth Client ID'
+  });
   
   // UI State
   const [isPrinting, setIsPrinting] = useState(false);
@@ -5464,15 +5767,149 @@ export default function App() {
     showToast('已複製通知文字！');
   };
 
-  const exportData = () => {
-    const data = { customers, orders, settings, machines, releases, exportedAt: new Date().toISOString() };
+  const buildBackupData = async (): Promise<BackupPayload> => {
+    const exportedAt = new Date().toISOString();
+    const basePayload = { customers, orders, settings, machines, releases, exportedAt };
+    const dataHash = await sha256(buildHashInput(basePayload));
+    return {
+      ...basePayload,
+      backupMeta: {
+        app: 'cuibo-gasha',
+        backupVersion: 1,
+        deviceId: getDeviceId(),
+        dataHash,
+        counts: getBackupCounts(customers, orders, machines, releases)
+      }
+    };
+  };
+
+  const exportData = async () => {
+    const data = await buildBackupData();
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = `cuibo_gasha_backup_${format(toZonedTime(new Date(), TAIWAN_TZ), 'yyyyMMdd')}.json`;
     a.click();
+    URL.revokeObjectURL(url);
   };
+
+  const refreshDriveBackups = useCallback(async () => {
+    if (!GOOGLE_CLIENT_ID) {
+      setDriveStatus(prev => ({ ...prev, message: '尚未設定 Google OAuth Client ID' }));
+      return;
+    }
+    setDriveStatus(prev => ({ ...prev, loading: true, message: '正在讀取 Google Drive 備份...' }));
+    try {
+      const token = await requestGoogleDriveToken();
+      const files = await listDriveBackups(token);
+      setDriveStatus({
+        connected: true,
+        loading: false,
+        latest: files[0] || null,
+        files,
+        message: files[0] ? `已找到 ${files.length} 份雲端備份` : 'Google Drive 尚無備份'
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setDriveStatus(prev => ({ ...prev, loading: false, message }));
+      showToast(`雲端備份讀取失敗：${message}`, 'error');
+    }
+  }, []);
+
+  const uploadDriveData = useCallback(async (force = false) => {
+    if (!GOOGLE_CLIENT_ID) {
+      showToast('尚未設定 Google OAuth Client ID', 'error');
+      return;
+    }
+
+    const localCounts = getBackupCounts(customers, orders, machines, releases);
+    const cloudCounts = parseCounts(driveStatus.latest);
+    if (!force && localCounts.totalRecords === 0 && (cloudCounts?.totalRecords || 0) > 0) {
+      setConfirmModal({
+        show: true,
+        title: '阻擋空白備份上傳',
+        message: '目前本地資料是空的，但 Google Drive 已經有非空白備份。為了避免新裝置誤把空資料當成最新備份，請確認你真的要上傳空白備份。',
+        type: 'danger',
+        checkboxLabel: '我確認要上傳空白備份',
+        onConfirm: (checked) => {
+          if (checked) uploadDriveData(true);
+          else showToast('已取消空白備份上傳', 'error');
+        }
+      });
+      return;
+    }
+
+    setDriveStatus(prev => ({ ...prev, loading: true, message: '正在上傳 Google Drive 備份...' }));
+    try {
+      const token = await requestGoogleDriveToken();
+      const payload = await buildBackupData();
+      const uploaded = await uploadDriveBackup(token, payload);
+      const files = await listDriveBackups(token);
+      const now = new Date().toISOString();
+      await setDoc(dbDoc('settings', 'global'), { lastBackupAt: now, lastDriveBackupAt: now }, { merge: true });
+      setDriveStatus({
+        connected: true,
+        loading: false,
+        latest: files[0] || uploaded,
+        files,
+        message: 'Google Drive 備份已上傳'
+      });
+      showToast('Google Drive 備份已上傳');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setDriveStatus(prev => ({ ...prev, loading: false, message }));
+      showToast(`雲端備份上傳失敗：${message}`, 'error');
+    }
+  }, [customers, orders, machines, releases, settings, driveStatus.latest]);
+
+  const downloadDriveData = useCallback(async () => {
+    if (!GOOGLE_CLIENT_ID) {
+      showToast('尚未設定 Google OAuth Client ID', 'error');
+      return;
+    }
+
+    setDriveStatus(prev => ({ ...prev, loading: true, message: '正在讀取 Google Drive 備份...' }));
+    try {
+      const token = await requestGoogleDriveToken();
+      const files = driveStatus.files.length > 0 ? driveStatus.files : await listDriveBackups(token);
+      const latest = files[0];
+      if (!latest) {
+        setDriveStatus({ connected: true, loading: false, latest: null, files: [], message: 'Google Drive 尚無備份' });
+        showToast('Google Drive 尚無備份', 'error');
+        return;
+      }
+
+      const cloudCounts = parseCounts(latest);
+      const localCounts = getBackupCounts(customers, orders, machines, releases);
+      const proceed = async () => {
+        setDriveStatus(prev => ({ ...prev, loading: true, message: '正在下載最新雲端備份...' }));
+        const data = await downloadDriveBackup(token, latest.id);
+        const prepared = prepareImportPayload(data, latest.name, Number(latest.size) || JSON.stringify(data).length);
+        setImportPreview(prepared);
+        setDriveStatus({ connected: true, loading: false, latest, files, message: '雲端備份已下載，請確認匯入預覽' });
+        showToast('雲端備份已下載，請確認後開始匯入');
+      };
+
+      if (localCounts.totalRecords > 0) {
+        setDriveStatus(prev => ({ ...prev, loading: false, latest, files, message: '雲端備份已讀取，等待確認下載' }));
+        setConfirmModal({
+          show: true,
+          title: '下載雲端備份',
+          message: `目前本地有 ${localCounts.totalRecords} 筆資料，雲端最新備份有 ${cloudCounts?.totalRecords ?? '未知'} 筆。下載後會先顯示匯入預覽，不會立刻覆蓋；按「開始匯入」才會取代本地資料。`,
+          type: 'info',
+          onConfirm: proceed
+        });
+        return;
+      }
+
+      await proceed();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setDriveStatus(prev => ({ ...prev, loading: false, message }));
+      showToast(`雲端備份下載失敗：${message}`, 'error');
+    }
+  }, [customers, orders, machines, releases, driveStatus.files]);
 
   const applyPreparedImport = async (prepared: PreparedImport) => {
     try {
@@ -5683,7 +6120,6 @@ export default function App() {
               {activeTab === 'settings' && (
                 <SettingsView 
                   settings={settings} 
-                  onLogout={() => signOut(auth)}
                   showToast={showToast}
                   setConfirmModal={setConfirmModal}
                   exportData={exportData}
@@ -5692,6 +6128,10 @@ export default function App() {
                   confirmImport={confirmImport}
                   clearImportPreview={clearImportPreview}
                   importInProgress={importInProgress}
+                  driveStatus={driveStatus}
+                  uploadDriveData={uploadDriveData}
+                  downloadDriveData={downloadDriveData}
+                  refreshDriveBackups={refreshDriveBackups}
                 />
               )}
             </motion.div>

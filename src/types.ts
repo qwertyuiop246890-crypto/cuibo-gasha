@@ -74,4 +74,5 @@ export interface SystemSettings {
   notificationTemplate: string;
   priceMap: Record<number, number>; // JPY to TWD mapping
   lastBackupAt?: string;
+  lastDriveBackupAt?: string;
 }
