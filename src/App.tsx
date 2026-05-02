@@ -3352,6 +3352,7 @@ const CustomerDetailView = ({
   const handleConfirmRelease = async () => {
     if (!releasingItem || releaseQuantity < 1) return;
     const { orderId, item } = releasingItem;
+    const confirmedReleaseQuantity = Math.max(1, Math.min(Number(releaseQuantity) || 1, item.quantity));
     try {
       const now = new Date().toISOString();
       const releaseRef = dbDoc('releases');
@@ -3362,7 +3363,7 @@ const CustomerDetailView = ({
         rawIds,
         customerName: customer.name,
         machineName: item.machineName,
-        quantity: releaseQuantity,
+        quantity: confirmedReleaseQuantity,
         price: item.price,
         status: 'pending',
         createdAt: now,
@@ -4067,10 +4068,21 @@ const CustomerDetailView = ({
               <div className="mb-4">
                 <label className="text-xs font-bold text-ink/40 block mb-2">釋出數量</label>
                 <div className="flex items-center gap-4">
-                  <button onClick={() => setReleaseQuantity(Math.max(1, releaseQuantity - 1))} className="w-10 h-10 bg-background rounded-full flex items-center justify-center shadow-sm">-</button>
-                  <span className="text-xl font-bold w-8 text-center">{releaseQuantity}</span>
-                  <button onClick={() => setReleaseQuantity(Math.min(releasingItem.item.quantity, releaseQuantity + 1))} className="w-10 h-10 bg-background rounded-full flex items-center justify-center shadow-sm">+</button>
+                  <button onClick={() => setReleaseQuantity(prev => Math.max(1, prev - 1))} className="w-10 h-10 bg-background rounded-full flex items-center justify-center shadow-sm">-</button>
+                  <input
+                    type="number"
+                    min={1}
+                    max={releasingItem.item.quantity}
+                    value={releaseQuantity}
+                    onChange={(e) => {
+                      const value = parseInt(e.target.value, 10);
+                      setReleaseQuantity(Number.isNaN(value) ? 1 : Math.max(1, Math.min(releasingItem.item.quantity, value)));
+                    }}
+                    className="w-20 px-3 py-2 bg-background rounded-xl border-none text-center text-xl font-bold text-ink focus:ring-2 focus:ring-primary-blue"
+                  />
+                  <button onClick={() => setReleaseQuantity(prev => Math.min(releasingItem.item.quantity, prev + 1))} className="w-10 h-10 bg-background rounded-full flex items-center justify-center shadow-sm">+</button>
                 </div>
+                <p className="text-[10px] text-ink/30 mt-2">可釋出數量：{releasingItem.item.quantity}</p>
               </div>
 
               <div className="flex gap-2 pt-6">
