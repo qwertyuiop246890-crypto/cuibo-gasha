@@ -4391,13 +4391,13 @@ const SettingsView = ({
     setConfirmModal({
       show: true,
       title: '刪除全部資料',
-      message: '確定要刪除所有訂單、機台與顧客資料嗎？此操作無法復原！',
+      message: '確定要刪除所有訂單、機台、顧客與釋出資料嗎？通知範本與價格設定會保留。',
       type: 'danger',
       onConfirm: async () => {
         try {
-          const collections = ['orders', 'machines', 'customers'];
+          const collections = ['orders', 'machines', 'customers', 'releases'];
           for (const colName of collections) {
-            const snapshot = await getDocs(collection(db, colName));
+            const snapshot = await getDocs(col(colName));
             let currentPromises: Promise<void>[] = [];
             for (const doc of snapshot.docs) {
               currentPromises.push(deleteDoc(doc.ref));
@@ -4410,7 +4410,8 @@ const SettingsView = ({
               await Promise.all(currentPromises);
             }
           }
-          showToast('全部資料已清除');
+          window.dispatchEvent(new CustomEvent('cuibo-clear-local-data'));
+          showToast('全部資料已清除，通知範本已保留');
         } catch (err: any) {
           if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
             showToast('清除失敗：資料庫免費額度已滿', 'error');
@@ -4787,6 +4788,20 @@ export default function App() {
     }
   }, [customers]);
 
+  useEffect(() => {
+    const clearLocalDataState = () => {
+      setCustomers([]);
+      setOrders([]);
+      setMachines([]);
+      setReleases([]);
+      setSelectedCustomer(null);
+      setSelectedOrder(null);
+      setEditingMachine(null);
+    };
+    window.addEventListener('cuibo-clear-local-data', clearLocalDataState);
+    return () => window.removeEventListener('cuibo-clear-local-data', clearLocalDataState);
+  }, []);
+
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
     if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
@@ -4881,15 +4896,31 @@ export default function App() {
     return grouped;
   };
 
-  const copyCustomerNotification = (customer: Customer) => {
-    if (!settings) return;
+  const copyText = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+  };
+
+  const copyCustomerNotification = async (customer: Customer) => {
+    const notificationTemplate = settings?.notificationTemplate || DEFAULT_NOTIFICATION_TEMPLATE;
     
     const customerOrders = orders.filter(o => o.customerId === customer.id);
     const allItems = groupItemsHelper(customerOrders.flatMap(o => o.items));
     
     const itemsText = allItems.map(i => `${i.machineName} ${i.variant ? `(${i.variant})` : ''} x ${i.quantity} $${i.subtotal}`).join('\n');
     
-    let text = settings.notificationTemplate || '';
+    let text = notificationTemplate;
     if (text && (text.includes('{customerName}') || text.includes('{items}') || text.includes('{totalAmount}'))) {
       text = text.replace(/{customerName}/g, customer.name);
       text = text.replace(/{items}/g, itemsText);
@@ -4900,17 +4931,17 @@ export default function App() {
       text = text ? `${upperPart}\n\n${text}` : upperPart;
     }
     
-    navigator.clipboard.writeText(text);
+    await copyText(text);
     showToast('已複製通知文字！');
   };
 
-  const copyNotification = (order: Order) => {
-    if (!settings) return;
+  const copyNotification = async (order: Order) => {
+    const notificationTemplate = settings?.notificationTemplate || DEFAULT_NOTIFICATION_TEMPLATE;
     
     const groupedItems = groupItemsHelper(order.items);
     const itemsText = groupedItems.map(i => `${i.machineName} ${i.variant ? `(${i.variant})` : ''} x ${i.quantity} $${i.subtotal}`).join('\n');
     
-    let text = settings.notificationTemplate || '';
+    let text = notificationTemplate;
     if (text && (text.includes('{customerName}') || text.includes('{items}') || text.includes('{totalAmount}'))) {
       text = text.replace(/{customerName}/g, order.customerName);
       text = text.replace(/{items}/g, itemsText);
@@ -4921,7 +4952,7 @@ export default function App() {
       text = text ? `${upperPart}\n\n${text}` : upperPart;
     }
     
-    navigator.clipboard.writeText(text);
+    await copyText(text);
     showToast('已複製通知文字！');
   };
 
