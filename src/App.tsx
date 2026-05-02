@@ -4439,6 +4439,32 @@ const Dashboard = ({
   }, 0), 0);
 
   const pendingReleases = releases.filter(r => r.status === 'pending');
+  const pendingReleaseGroups = Array.from(
+    pendingReleases.reduce((map, release) => {
+      const key = [
+        release.customerName.replace(/\s+/g, ''),
+        release.machineName,
+        release.variant || '',
+        release.price
+      ].join('|');
+      const existing = map.get(key);
+      if (existing) {
+        existing.quantity += Number(release.quantity) || 0;
+        existing.entries.push(release);
+        existing.releaseAt = existing.releaseAt && release.releaseAt
+          ? (new Date(existing.releaseAt).getTime() <= new Date(release.releaseAt).getTime() ? existing.releaseAt : release.releaseAt)
+          : (existing.releaseAt || release.releaseAt);
+      } else {
+        map.set(key, {
+          ...release,
+          id: key,
+          quantity: Number(release.quantity) || 0,
+          entries: [release]
+        });
+      }
+      return map;
+    }, new Map<string, any>()).values()
+  ) as any[];
 
   const [transferringRelease, setTransferringRelease] = useState<any | null>(null);
   const [targetCustomerName, setTargetCustomerName] = useState('');
@@ -4451,6 +4477,7 @@ const Dashboard = ({
       return;
     }
     const release = transferringRelease;
+    const releaseEntries = Array.isArray(release.entries) ? release.entries : [release];
 
     if (trimmedTarget === release.customerName.replace(/\s+/g, '')) {
       showToast('不能轉讓給原顧客自己！', 'error');
@@ -4473,47 +4500,58 @@ const Dashboard = ({
       }
 
       // 2. Update release status
-      batch.update(dbDoc('releases', release.id), {
+      releaseEntries.forEach((entry: any) => batch.update(dbDoc('releases', entry.id), {
         status: 'completed',
         transferredAt: now,
         transferTargetCustomerId: targetId,
         transferTargetCustomerName: trimmedTarget
-      });
+      }));
       
       // 3. Update the original order item and customer
-      const orderRef = dbDoc('orders', release.orderId);
-      const orderSnap = await getDoc(orderRef);
-      let itemToTransfer: any = null;
-      
-      if (orderSnap.exists()) {
+      const entriesByOrder = releaseEntries.reduce((map: Map<string, any[]>, entry: any) => {
+        const group = map.get(entry.orderId) || [];
+        group.push(entry);
+        map.set(entry.orderId, group);
+        return map;
+      }, new Map<string, any[]>());
+      let totalTransferQuantity = 0;
+      let totalTransferSubtotal = 0;
+      let firstTransferredItem: any = null;
+
+      for (const [orderId, entries] of entriesByOrder) {
+        const orderRef = dbDoc('orders', orderId);
+        const orderSnap = await getDoc(orderRef);
+        if (!orderSnap.exists()) continue;
+
         const orderData = orderSnap.data() as Order;
-        const rawIds = release.rawIds || [release.itemId];
-        
-        const oldItems = orderData.items.filter(i => rawIds.includes(i.id));
-        const oldQty = oldItems.reduce((sum, i) => sum + i.quantity, 0);
-        const oldSubtotal = oldItems.reduce((sum, i) => sum + i.subtotal, 0);
+        let newItems = [...orderData.items];
+        let orderTransferQuantity = 0;
+        let orderTransferSubtotal = 0;
 
-        const transferQuantity = Math.max(0, Math.min(Number(release.quantity) || 0, oldQty));
-        const transferSubtotal = transferQuantity * release.price;
-        if (oldItems.length === 0 || transferQuantity < 1) {
-          showToast('原顧客帳上已沒有可轉讓數量', 'error');
-          return;
-        }
-        
-        if (oldItems.length > 0 && transferQuantity > 0) {
-          itemToTransfer = {
-            id: rawIds[0],
-            machineName: release.machineName,
-            variant: release.variant,
-            price: release.price,
-            quantity: transferQuantity,
-            subtotal: transferSubtotal,
-            callTime: oldItems[0]?.callTime || oldItems[0]?.createdAt,
-            transferAt: now,
-            sourceCustomerName: release.customerName
-          };
+        for (const entry of entries) {
+          const rawIds = entry.rawIds || [entry.itemId];
+          const oldItems = newItems.filter(i => rawIds.includes(i.id));
+          const oldQty = oldItems.reduce((sum, i) => sum + i.quantity, 0);
+          const oldSubtotal = oldItems.reduce((sum, i) => sum + i.subtotal, 0);
+          const transferQuantity = Math.max(0, Math.min(Number(entry.quantity) || 0, oldQty));
+          const transferSubtotal = transferQuantity * entry.price;
 
-          let newItems = orderData.items.filter(i => !rawIds.includes(i.id));
+          if (oldItems.length === 0 || transferQuantity < 1) {
+            continue;
+          }
+
+          if (!firstTransferredItem) {
+            firstTransferredItem = {
+              machineName: entry.machineName,
+              variant: entry.variant,
+              price: entry.price,
+              callTime: oldItems[0]?.callTime || oldItems[0]?.createdAt,
+              transferAt: now,
+              sourceCustomerName: entry.customerName
+            };
+          }
+
+          newItems = newItems.filter(i => !rawIds.includes(i.id));
           const remainingQuantity = Math.max(0, oldQty - transferQuantity);
           const remainingItem = {
             ...oldItems[0],
@@ -4529,27 +4567,37 @@ const Dashboard = ({
           // @ts-ignore
           delete remainingItem.rawIds;
           newItems.push(remainingItem);
-          
+
+          orderTransferQuantity += transferQuantity;
+          orderTransferSubtotal += transferSubtotal;
+        }
+
+        if (orderTransferQuantity > 0) {
           const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
           batch.update(orderRef, {
             items: newItems,
             totalAmount: newTotal,
             updatedAt: now
           });
-
-          // Update original customer's totalSpent and totalItems
           batch.set(dbDoc('customers', orderData.customerId), {
-            totalSpent: increment(-itemToTransfer.subtotal),
-            totalItems: increment(-itemToTransfer.quantity)
+            totalSpent: increment(-orderTransferSubtotal),
+            totalItems: increment(-orderTransferQuantity)
           }, { merge: true });
+          totalTransferQuantity += orderTransferQuantity;
+          totalTransferSubtotal += orderTransferSubtotal;
         }
       }
 
       // 4. Add to target customer's pending order or create new
-      if (itemToTransfer) {
+      if (firstTransferredItem && totalTransferQuantity > 0) {
         const transferredItem = {
-          ...itemToTransfer,
+          ...firstTransferredItem,
           id: crypto.randomUUID(),
+          quantity: totalTransferQuantity,
+          subtotal: totalTransferSubtotal,
+          createdAt: now,
+          updatedAt: now,
+          transferAt: now,
           isReleased: false
         };
 
@@ -4578,18 +4626,21 @@ const Dashboard = ({
         if (createdTargetCustomerRef) {
           batch.set(createdTargetCustomerRef, {
             name: trimmedTarget,
-            totalSpent: transferredItem.subtotal,
-            totalItems: transferredItem.quantity,
+            totalSpent: totalTransferSubtotal,
+            totalItems: totalTransferQuantity,
             createdAt: now,
             lastOrderAt: now
           });
         } else {
           batch.set(dbDoc('customers', targetId!), {
-            totalSpent: increment(transferredItem.subtotal),
-            totalItems: increment(transferredItem.quantity),
+            totalSpent: increment(totalTransferSubtotal),
+            totalItems: increment(totalTransferQuantity),
             lastOrderAt: now
           }, { merge: true });
         }
+      } else {
+        showToast('原顧客帳上已沒有可轉讓數量', 'error');
+        return;
       }
 
       showToast('釋出轉移成功！');
@@ -4679,20 +4730,21 @@ const Dashboard = ({
           <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest mb-6 flex items-center justify-between">
             <span>釋出池</span>
             <div className="flex items-center gap-2">
-              <span className="bg-primary-blue/10 text-primary-blue px-2 py-1 rounded text-[10px]">{pendingReleases.length} 筆待處理</span>
-              <span className="bg-orange-500/10 text-orange-500 px-2 py-1 rounded text-[10px]">共 {pendingReleases.reduce((sum, r) => sum + r.quantity, 0)} 顆</span>
+              <span className="bg-primary-blue/10 text-primary-blue px-2 py-1 rounded text-[10px]">{pendingReleaseGroups.length} 組待處理</span>
+              <span className="bg-orange-500/10 text-orange-500 px-2 py-1 rounded text-[10px]">共 {pendingReleaseGroups.reduce((sum, r) => sum + r.quantity, 0)} 顆</span>
             </div>
           </h3>
           <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2">
-            {pendingReleases.length === 0 ? (
+            {pendingReleaseGroups.length === 0 ? (
               <p className="text-center py-8 text-ink/30 text-sm">目前沒有釋出中的扭蛋</p>
             ) : (
-              pendingReleases.map(r => (
+              pendingReleaseGroups.map(r => (
                 <div key={r.id} className="p-4 bg-background rounded-2xl flex items-center justify-between group">
                   <div>
                     <div className="flex items-center gap-2 mb-1">
                       <span className="font-bold text-ink">{r.machineName}</span>
                       {r.variant && <span className="text-[10px] bg-ink/5 px-1.5 py-0.5 rounded text-ink/60">{r.variant}</span>}
+                      {r.entries?.length > 1 && <span className="text-[10px] bg-primary-blue/10 px-1.5 py-0.5 rounded text-primary-blue">合併 {r.entries.length} 筆</span>}
                     </div>
                     <p className="text-xs text-ink/40">
                       來自 <span className="font-bold text-ink/60">{r.customerName}</span> • {r.quantity} 顆 • NT${r.price}/顆 • 釋出 {formatDateTime(r.releaseAt || r.createdAt)}
