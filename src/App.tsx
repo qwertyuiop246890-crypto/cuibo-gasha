@@ -699,19 +699,22 @@ const CreateOrder = ({
       };
 
       const compressedDataUrl = await compressImage(file);
-      
-      // 檢查是否已經上傳過相同的圖片 (精確匹配)
-      const existingMachineByImg = machines.find(m => m.imageUrl === compressedDataUrl);
-      if (existingMachineByImg) {
-        setMachineName(existingMachineByImg.name);
-        setPrice(existingMachineByImg.defaultPrice);
-        if (existingMachineByImg.variants && existingMachineByImg.variants.length > 0) {
-          setOrderItems(existingMachineByImg.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
+      const loadExistingMachine = (machine: any, message: string) => {
+        setMachineName(machine.name);
+        setPrice(machine.defaultPrice);
+        if (machine.variants && machine.variants.length > 0) {
+          setOrderItems(machine.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
         } else {
           setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
         }
         setUploadedImage(compressedDataUrl);
-        showToast('已載入相同圖片的機台資料！', 'success');
+        showToast(message, 'success');
+      };
+      
+      // 檢查是否已經上傳過相同的圖片 (精確匹配)
+      const existingMachineByImg = machines.find(m => m.imageUrl === compressedDataUrl);
+      if (existingMachineByImg) {
+        loadExistingMachine(existingMachineByImg, `已找到相同圖片：使用既有機台「${existingMachineByImg.name}」與已建立款式`);
         setIsAnalyzing(false);
         return;
       }
@@ -741,15 +744,8 @@ const CreateOrder = ({
         }
 
         if (bestMatch && lowestDist <= 6) {
-          setMachineName(bestMatch.name);
-          setPrice(bestMatch.defaultPrice);
-          if (bestMatch.variants && bestMatch.variants.length > 0) {
-            setOrderItems(bestMatch.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
-          } else {
-            setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
-          }
-          setUploadedImage(compressedDataUrl);
-          showToast('發現相似度極高的圖片，已載入機台資料！', 'success');
+          const similarity = Math.round((1 - lowestDist / 64) * 100);
+          loadExistingMachine(bestMatch, `圖片相似度 ${similarity}%：已使用既有機台「${bestMatch.name}」與已建立款式`);
           setIsAnalyzing(false);
           return;
         }
@@ -795,23 +791,35 @@ const CreateOrder = ({
         ],
         config: {
           systemInstruction: `[角色任務]
-你是一位嚴謹且精通日文的電商倉儲與商品辨識 AI 專家，專為代購營運系統設計，負責將視覺資訊精準轉化為高效率、易於複製的撿貨標籤與建檔資料，協助倉儲助理無縫管理扭蛋等商品訂單。
+你是一位嚴謹且精通日文、台灣玩具圈在地用語與電商倉儲管理的扭蛋辨識專家。你的任務是將日本扭蛋商品圖片轉換成台灣玩家看得懂、倉儲人員容易撿貨、且能避免重複建檔的機台名稱與款式名稱。
 
 [背景資訊]
-為了提升實體撿貨的直覺性與作業效率，必須將圖片中的商品轉換為標準化名稱。以圖片確切證據為優先，遇遮擋、標籤不清楚或缺乏明顯特徵時，必須主動啟動網路搜尋進行交叉比對與補全。維持撿貨名稱與視覺特徵的高度一致性是庫存管理的核心。
+需處理日本扭蛋商品資訊，克服語言與文化差異，並確保所有翻譯完全符合台灣玩家的習慣用語。為了提升實體撿貨的直覺性與作業效率，必須將圖片中的商品轉換為標準化名稱。維持既有資料的一致性是第一優先，不能因翻譯方式不同而建立重複機台或重複款式。
+
+[既有資料庫優先]
+在產生任何新名稱前，請先比對以下已建立機台與款式。若圖片中的商品屬於既有機台，machineName 必須逐字回傳既有機台名稱，variants 必須優先逐字使用該機台已建立款式，不得另創其他翻譯版本。
+現有機台與款式：
+${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.length > 0 ? m.variants.join('、') : '尚無款式'}`).join('\n')}
 
 [具體指令]
-1. 歷史翻譯與特徵擷取：精確辨識圖片中的日文原文與核心外觀特徵（如顏色、手持配件、動作）。
-2. 標準化組合：將名稱依序組合為：[販售地點/品牌] [主要角色/系列總稱] [款式視覺核心特徵] [物品類型]。
-3. 扭蛋特殊處理（15字極簡標題 + 肉眼優先檢貨標籤）：若商品為扭蛋，請翻譯中文名稱，並建立「系列檢貨標題」。標題總字數嚴格限制在 15 字以內（主動去除贅字，僅保留核心角色與主題）。接著，完整條列該系列「每一款」的名稱與具備最強視覺識別性的「視覺特徵檢貨名稱」。格式請務必使用：[角色/款式名稱] [視覺特徵]（例如：美樂蒂 手上拿麥克風）。請勿包含括號或「檢貨」字樣，以確保列印美觀。
-4. 個別獨立介紹：將圖片中的商品個別分開列出。
+在開始辨識與翻譯前，請務必先啟動「內部事實查核」程序：
+1. 證據優先：僅依據圖片可見資訊、既有資料庫資料，以及可查證的官方或市售資訊回答，嚴禁使用「可能、應該、或許」等模糊推測。
+2. 允許留白：如果對某款式的翻譯或資訊信心水準低於 90%，或缺乏足夠資訊，該款式直接輸出「【資料不足，無法確認】」。
+3. 來源標註：請在 factCheckNotes 或 sources 中列出查證依據、參考來源連結，或明確說明是根據圖片可見特徵與既有資料庫比對而來。
+
+完成查核後，請執行以下操作：
+1. 上網搜尋並確認該扭蛋系列的完整官方或市售資訊。
+2. 辨識出該系列包含的所有款式。
+3. 將每一種款式的日文名稱逐一翻譯為最貼近台灣習慣的道地用語。
+4. 扭蛋系列機台名稱限制在 15 字以內，主動去除行銷贅字，僅保留核心角色與主題。
+5. 款式名稱以肉眼撿貨為優先，格式使用「角色/款式名稱 + 視覺特徵」，例如「美樂蒂 手上拿麥克風」。請勿包含括號或「檢貨」字樣。
 
 [約束條件]
 - 視覺核心優先與字數限制：去除所有行銷贅字。扭蛋系列檢貨標題絕對不可超過 15 個字。單款視覺特徵檢貨名稱應極致精煉，專注描述核心外觀差異，格式為「名稱+特徵」。
-- 現有機台優先：如果圖片中的商品明顯屬於以下「現有機台清單」中的某一款，請務必直接使用該機台的精確名稱作為 machineName 回傳，不要自己發明新名稱。
-  現有機台清單：${machines.map(m => m.name).join(', ')}
+- 現有機台優先：如果圖片中的商品屬於既有機台，請務必直接使用既有 machineName 與既有 variants，避免因翻譯差異建立重複資料。
+- 若既有機台已有款式，除非圖片明確出現資料庫沒有的新款式，否則不要輸出新的款式翻譯。
 - 證據優先：嚴禁使用「可能、應該、或許」等模糊推測。
-- 允許留白：若信心水準仍低於 90% 或無法確認品項，請直接放棄該品項命名，並輸出：「【資料不足，無法確認】」。
+- 允許留白：若信心水準低於 90% 或無法確認品項，請輸出「【資料不足，無法確認】」。
 - 格式要求：一律使用繁體中文。`,
           responseMimeType: "application/json",
           responseSchema: {
@@ -831,6 +839,17 @@ const CreateOrder = ({
               price: { 
                 type: Type.NUMBER,
                 description: "辨識出的金額"
+              },
+              factCheckNotes: {
+                type: Type.STRING,
+                description: "簡短說明查證依據、推論邏輯，或指出已沿用資料庫既有資料"
+              },
+              sources: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.STRING,
+                  description: "官方或市售參考來源連結；若無可靠來源可留空陣列"
+                }
               }
             }
           }
@@ -848,9 +867,16 @@ const CreateOrder = ({
       if (text) {
         const result = JSON.parse(text);
         const aiMachineName = result.machineName || '';
+        const normalizeMachineName = (value: string) => value.toLowerCase().replace(/[\s　・･\-—＿_（）()【】\[\]]+/g, '');
         
-        // 檢查 AI 回傳的機台名稱是否已存在
-        const existingMachineByName = machines.find(m => m.name === aiMachineName);
+        // 檢查 AI 回傳的機台名稱是否已存在；若只是空格或標點差異，也優先沿用既有資料。
+        const normalizedAiMachineName = normalizeMachineName(aiMachineName);
+        const existingMachineByName = machines.find(m => {
+          const normalizedExistingName = normalizeMachineName(m.name);
+          return normalizedExistingName === normalizedAiMachineName ||
+            (normalizedAiMachineName.length >= 4 && normalizedExistingName.includes(normalizedAiMachineName)) ||
+            (normalizedExistingName.length >= 4 && normalizedAiMachineName.includes(normalizedExistingName));
+        });
         
         if (existingMachineByName) {
           setMachineName(existingMachineByName.name);
@@ -860,7 +886,7 @@ const CreateOrder = ({
           } else {
             setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
           }
-          showToast('AI 辨識為已有機台，已載入現有款式資料！', 'success');
+          showToast(`AI 辨識為已有機台「${existingMachineByName.name}」，已載入既有款式`, 'success');
         } else {
           if (aiMachineName) setMachineName(aiMachineName);
           if (result.variants && result.variants.length > 0) {
