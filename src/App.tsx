@@ -4643,8 +4643,11 @@ const PrintPreview = ({
                   size: A4;
                   margin: 7mm;
                 }
+                html,
                 body {
                   -webkit-print-color-adjust: exact;
+                  margin: 0 !important;
+                  padding: 0 !important;
                 }
                 table {
                   width: 100%;
@@ -4659,14 +4662,17 @@ const PrintPreview = ({
                 }
                 .print-page {
                   width: 100%;
-                  height: 283mm;
-                  break-after: page;
+                  height: auto !important;
+                  min-height: 0 !important;
+                  page-break-after: always;
+                  break-after: always;
                   box-shadow: none !important;
                   margin: 0 !important;
                   padding: 0 !important;
-                  overflow: hidden;
+                  overflow: visible !important;
                 }
                 .print-page:last-child {
+                  page-break-after: auto;
                   break-after: auto;
                 }
                 .print-page-inner {
