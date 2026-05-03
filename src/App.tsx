@@ -22,7 +22,7 @@ import { format } from 'date-fns';
 import { toZonedTime } from 'date-fns-tz';
 import { auth, db, col, dbDoc } from './localData';
 import { cn } from './lib/utils';
-import { Customer, Order, OrderItem, SystemSettings } from './types';
+import { Customer, MachineVariantDetail, OperationLog, Order, OrderItem, SystemSettings } from './types';
 
 // --- Types ---
 enum OperationType {
@@ -181,6 +181,7 @@ const DEFAULT_PRICE_MAP: Record<number, number> = {
 type TimelineFilterType = 'createdAt' | 'callTime' | 'updatedAt' | 'releaseAt' | 'transferAt' | 'exchangeAt';
 
 const optionalIsoString = (value: any) => typeof value === 'string' && value ? value : undefined;
+const optionalText = (value: any) => typeof value === 'string' && value.trim() ? value.trim() : undefined;
 
 const getItemTimelineValue = (item: OrderItem, order: Pick<Order, 'createdAt' | 'updatedAt'>, type: TimelineFilterType) => {
   if (type === 'createdAt') return order.createdAt || item.createdAt;
@@ -229,15 +230,103 @@ const normalizeOrderItem = (item: any): OrderItem => {
   };
 };
 
+const normalizeCustomerNameKey = (value: string) => value.replace(/\s+/g, '').toLowerCase();
+
+const normalizeCustomerAliases = (aliases: any): string[] => {
+  if (!Array.isArray(aliases)) return [];
+  return Array.from(new Set(
+    aliases
+      .filter((alias: any) => typeof alias === 'string')
+      .map((alias: string) => alias.trim())
+      .filter(Boolean)
+  ));
+};
+
 const normalizeCustomer = (id: string, data: any): Customer => ({
   id,
   ...data,
   name: typeof data?.name === 'string' ? data.name : '',
+  aliases: normalizeCustomerAliases(data?.aliases),
   totalSpent: Number(data?.totalSpent) || 0,
   totalItems: Number(data?.totalItems) || 0,
   createdAt: typeof data?.createdAt === 'string' ? data.createdAt : new Date().toISOString(),
   lastOrderAt: typeof data?.lastOrderAt === 'string' ? data.lastOrderAt : new Date().toISOString()
 });
+
+const customerMatchesName = (customer: Customer, inputName: string) => {
+  const key = normalizeCustomerNameKey(inputName);
+  if (!key) return false;
+  return normalizeCustomerNameKey(customer.name) === key ||
+    (customer.aliases || []).some(alias => normalizeCustomerNameKey(alias) === key);
+};
+
+const findCustomerByName = (customers: Customer[], inputName: string) => (
+  customers.find(customer => customerMatchesName(customer, inputName))
+);
+
+const getCustomerNameSuggestions = (customers: Customer[]) => Array.from(new Set(
+  customers.flatMap(customer => [customer.name, ...(customer.aliases || [])]).filter(Boolean)
+));
+
+const normalizeVariantNames = (variants: any): string[] => {
+  if (!Array.isArray(variants)) return [];
+  return Array.from(new Set(
+    variants
+      .filter((variant: any) => typeof variant === 'string')
+      .map((variant: string) => variant.trim())
+      .filter(Boolean)
+  ));
+};
+
+const createDefaultVariantDetails = (variants: string[]): Record<string, MachineVariantDetail> => (
+  variants.reduce<Record<string, MachineVariantDetail>>((acc, variant) => {
+    acc[variant] = { name: variant, aliases: [], active: true };
+    return acc;
+  }, {})
+);
+
+const normalizeVariantDetails = (variants: string[], rawDetails: any): Record<string, MachineVariantDetail> => {
+  const source = rawDetails && typeof rawDetails === 'object' && !Array.isArray(rawDetails) ? rawDetails : {};
+  return variants.reduce<Record<string, MachineVariantDetail>>((acc, variant) => {
+    const raw = source[variant] && typeof source[variant] === 'object' && !Array.isArray(source[variant])
+      ? source[variant]
+      : {};
+    acc[variant] = {
+      name: optionalText(raw.name) || variant,
+      originalName: optionalText(raw.originalName),
+      feature: optionalText(raw.feature),
+      aliases: normalizeCustomerAliases(raw.aliases),
+      active: raw.active === false ? false : true
+    };
+    return acc;
+  }, {});
+};
+
+const normalizeAiVariantDetails = (variants: string[], rawDetails: any): Record<string, MachineVariantDetail> => {
+  const source = Array.isArray(rawDetails)
+    ? rawDetails.reduce<Record<string, any>>((acc, item) => {
+        const name = optionalText(item?.name) || optionalText(item?.variant) || optionalText(item?.variantName);
+        if (name) acc[name] = item;
+        return acc;
+      }, {})
+    : rawDetails;
+  return normalizeVariantDetails(variants, source);
+};
+
+const formatMachineForAiPrompt = (machine: any) => {
+  const variants = normalizeVariantNames(machine?.variants);
+  if (variants.length === 0) return `- ${machine.name}：尚無款式`;
+  const details = normalizeVariantDetails(variants, machine?.variantDetails);
+  return `- ${machine.name}：${variants.map(variant => {
+    const detail = details[variant];
+    const parts = [variant];
+    if (detail.feature) parts.push(`特徵：${detail.feature}`);
+    if (detail.originalName) parts.push(`原文：${detail.originalName}`);
+    if (detail.aliases && detail.aliases.length > 0) parts.push(`別名：${detail.aliases.join('、')}`);
+    if (detail.active === false) parts.push('停用');
+    return parts.join(' / ');
+  }).join('、')}`;
+};
 
 const normalizeOrder = (id: string, data: any): Order => {
   const items = Array.isArray(data?.items) ? data.items.map(normalizeOrderItem) : [];
@@ -254,15 +343,19 @@ const normalizeOrder = (id: string, data: any): Order => {
   };
 };
 
-const normalizeMachine = (id: string, data: any) => ({
-  id,
-  ...data,
-  name: typeof data?.name === 'string' ? data.name : '',
-  defaultPrice: Number(data?.defaultPrice) || 0,
-  variants: Array.isArray(data?.variants) ? data.variants.filter((variant: any) => typeof variant === 'string') : [],
-  createdAt: typeof data?.createdAt === 'string' ? data.createdAt : new Date().toISOString(),
-  updatedAt: typeof data?.updatedAt === 'string' ? data.updatedAt : new Date().toISOString()
-});
+const normalizeMachine = (id: string, data: any) => {
+  const variants = normalizeVariantNames(data?.variants);
+  return {
+    id,
+    ...data,
+    name: typeof data?.name === 'string' ? data.name : '',
+    defaultPrice: Number(data?.defaultPrice) || 0,
+    variants,
+    variantDetails: normalizeVariantDetails(variants, data?.variantDetails),
+    createdAt: typeof data?.createdAt === 'string' ? data.createdAt : new Date().toISOString(),
+    updatedAt: typeof data?.updatedAt === 'string' ? data.updatedAt : new Date().toISOString()
+  };
+};
 
 const normalizeRelease = (id: string, data: any) => ({
   id,
@@ -281,6 +374,16 @@ const normalizeRelease = (id: string, data: any) => ({
   transferTargetCustomerName: optionalIsoString(data?.transferTargetCustomerName)
 });
 
+const normalizeOperationLog = (id: string, data: any): OperationLog => ({
+  id,
+  action: typeof data?.action === 'string' ? data.action : 'unknown',
+  targetType: typeof data?.targetType === 'string' ? data.targetType : 'system',
+  targetName: optionalIsoString(data?.targetName),
+  message: typeof data?.message === 'string' ? data.message : '',
+  details: data?.details && typeof data.details === 'object' && !Array.isArray(data.details) ? data.details : undefined,
+  createdAt: typeof data?.createdAt === 'string' ? data.createdAt : new Date().toISOString()
+});
+
 const normalizeSettings = (id: string, data: any): SystemSettings => ({
   id,
   ...data,
@@ -295,6 +398,7 @@ const IMPORT_COLLECTIONS = [
   { key: 'orders', path: 'orders' },
   { key: 'machines', path: 'machines' },
   { key: 'releases', path: 'releases' },
+  { key: 'operationLogs', path: 'operationLogs' },
 ] as const;
 
 type ImportCollectionKey = typeof IMPORT_COLLECTIONS[number]['key'];
@@ -309,6 +413,7 @@ type PreparedImport = {
     orders: Order[];
     machines: any[];
     releases: any[];
+    operationLogs: OperationLog[];
     settings: Omit<SystemSettings, 'id'> | null;
   };
 };
@@ -319,6 +424,7 @@ type BackupPayload = {
   settings: SystemSettings | null;
   machines: any[];
   releases: any[];
+  operationLogs: OperationLog[];
   exportedAt: string;
   backupMeta: {
     app: 'cuibo-gasha';
@@ -327,6 +433,15 @@ type BackupPayload = {
     dataHash: string;
     counts: BackupCounts;
   };
+};
+
+type RestoreSnapshot = {
+  customers: Customer[];
+  orders: Order[];
+  machines: any[];
+  releases: any[];
+  settings: Omit<SystemSettings, 'id'> | null;
+  createdAt: string;
 };
 
 type BackupCounts = Record<ImportCollectionKey, number> & { images: number; totalRecords: number };
@@ -401,6 +516,7 @@ const prepareImportPayload = (raw: any, fileName: string, fileSize: number): Pre
   }));
   const machines = (raw.machines || []).map((item: any) => normalizeMachine(item.id, item));
   const releases = (raw.releases || []).map((item: any) => normalizeRelease(item.id, item));
+  const operationLogs = (raw.operationLogs || []).map((item: any) => normalizeOperationLog(item.id, item));
   const normalizedSettings = raw.settings
     ? (() => {
         const { id, ...rest } = normalizeSettings('global', raw.settings);
@@ -430,6 +546,7 @@ const prepareImportPayload = (raw: any, fileName: string, fileSize: number): Pre
       orders: orders.length,
       machines: machines.length,
       releases: releases.length,
+      operationLogs: operationLogs.length,
       images
     },
     warnings,
@@ -438,19 +555,153 @@ const prepareImportPayload = (raw: any, fileName: string, fileSize: number): Pre
       orders,
       machines,
       releases,
+      operationLogs,
       settings: normalizedSettings
     }
   };
 };
 
+const createRestoreSnapshot = async (): Promise<RestoreSnapshot> => {
+  const readCollection = async <T,>(name: string, normalizer: (id: string, data: any) => T) => {
+    const snapshot = await getDocs(col(name));
+    return snapshot.docs.map((item: any) => normalizer(item.id, item.data()));
+  };
+
+  const settingsSnap = await getDoc(dbDoc('settings', 'global'));
+  const normalizedSettings = settingsSnap.exists()
+    ? (() => {
+        const { id, ...rest } = normalizeSettings(settingsSnap.id, settingsSnap.data());
+        return rest;
+      })()
+    : null;
+
+  return {
+    customers: await readCollection('customers', normalizeCustomer),
+    orders: await readCollection('orders', normalizeOrder),
+    machines: await readCollection('machines', normalizeMachine),
+    releases: await readCollection('releases', normalizeRelease),
+    settings: normalizedSettings,
+    createdAt: new Date().toISOString()
+  };
+};
+
+const pruneRestoreSnapshots = async (keepCount = 30) => {
+  try {
+    const snapshot = await getDocs(col('operationLogs'));
+    const logs = snapshot.docs
+      .map((item: any) => ({ id: item.id, ref: item.ref, ...normalizeOperationLog(item.id, item.data()) }))
+      .filter((log: OperationLog) => Boolean(log.details?.restoreSnapshot))
+      .sort((a: OperationLog, b: OperationLog) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    const expired = logs.slice(keepCount);
+    await Promise.all(expired.map((log: any) => updateDoc(log.ref, {
+      details: {
+        ...(log.details || {}),
+        restoreSnapshot: undefined,
+        restorePointExpired: true
+      }
+    })));
+  } catch (err) {
+    console.warn('Restore snapshot prune failed', err);
+  }
+};
+
+const addOperationLog = async (
+  action: string,
+  targetType: string,
+  message: string,
+  targetName?: string,
+  details?: Record<string, any>,
+  options: { createRestorePoint?: boolean } = { createRestorePoint: true }
+) => {
+  try {
+    const restoreSnapshot = options.createRestorePoint === false ? undefined : await createRestoreSnapshot();
+    await setDoc(dbDoc('operationLogs'), {
+      action,
+      targetType,
+      targetName,
+      message,
+      details: restoreSnapshot ? { ...(details || {}), restoreSnapshot } : details,
+      createdAt: new Date().toISOString()
+    });
+    if (restoreSnapshot) {
+      pruneRestoreSnapshots();
+    }
+  } catch (err) {
+    console.warn('Operation log failed', err);
+  }
+};
+
+const getLatestDataTime = (customers: Customer[], orders: Order[], machines: any[], releases: any[]) => {
+  const dates = [
+    ...customers.map(item => item.lastOrderAt || item.createdAt),
+    ...orders.map(item => item.updatedAt || item.createdAt),
+    ...orders.flatMap(order => order.items.map(item => item.updatedAt || item.callTime || item.createdAt)),
+    ...machines.map(item => item.updatedAt || item.createdAt),
+    ...releases.map(item => item.transferredAt || item.releaseAt || item.createdAt)
+  ]
+    .map(value => value ? new Date(value).getTime() : 0)
+    .filter(value => Number.isFinite(value) && value > 0);
+
+  if (dates.length === 0) return null;
+  return new Date(Math.max(...dates)).toISOString();
+};
+
+const isBackupStale = (latestLocalAt: string | null, lastBackupAt?: string) => {
+  if (!latestLocalAt) return false;
+  if (!lastBackupAt) return true;
+  return new Date(latestLocalAt).getTime() > new Date(lastBackupAt).getTime() + 60 * 1000;
+};
+
 const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
-const GOOGLE_CLIENT_ID = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID as string | undefined;
+const GOOGLE_CLIENT_ID_STORAGE_KEY = 'cuibo_gasha_google_client_id';
+const GOOGLE_DRIVE_REDIRECT_STATE_KEY = 'cuibo_gasha_drive_redirect_state';
+const GOOGLE_DRIVE_REDIRECT_ACTION_KEY = 'cuibo_gasha_drive_redirect_action';
+const GOOGLE_DRIVE_TOKEN_STORAGE_KEY = 'cuibo_gasha_drive_token';
+const DEFAULT_GOOGLE_CLIENT_ID = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID as string | undefined;
+
+const getGoogleClientId = () => {
+  return DEFAULT_GOOGLE_CLIENT_ID || localStorage.getItem(GOOGLE_CLIENT_ID_STORAGE_KEY) || '';
+};
+
+const getGoogleAuthOrigin = () => window.location.origin;
+const getGoogleAuthRedirectUri = () => `${window.location.origin}${window.location.pathname}`;
+
+const getStoredDriveToken = () => {
+  try {
+    const raw = sessionStorage.getItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.token || !parsed?.expiresAt) return null;
+    if (Date.now() > Number(parsed.expiresAt) - 60 * 1000) {
+      sessionStorage.removeItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY);
+      return null;
+    }
+    return parsed.token as string;
+  } catch {
+    sessionStorage.removeItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY);
+    return null;
+  }
+};
+
+const storeDriveToken = (token: string, expiresInSeconds = 3600) => {
+  sessionStorage.setItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY, JSON.stringify({
+    token,
+    expiresAt: Date.now() + expiresInSeconds * 1000
+  }));
+};
+
+const clearDriveToken = () => {
+  sessionStorage.removeItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY);
+};
 
 declare global {
   interface Window {
     google?: any;
   }
 }
+
+let googleIdentityScriptPromise: Promise<void> | null = null;
 
 const getDeviceId = () => {
   const storageKey = 'cuibo_gasha_device_id';
@@ -465,7 +716,8 @@ const getBackupCounts = (
   customers: Customer[],
   orders: Order[],
   machines: any[],
-  releases: any[]
+  releases: any[],
+  operationLogs: OperationLog[] = []
 ): BackupCounts => {
   const images = machines.filter(machine => typeof machine?.imageUrl === 'string' && machine.imageUrl.trim()).length;
   return {
@@ -473,6 +725,7 @@ const getBackupCounts = (
     orders: orders.length,
     machines: machines.length,
     releases: releases.length,
+    operationLogs: operationLogs.length,
     images,
     totalRecords: customers.length + orders.length + machines.length + releases.length
   };
@@ -485,6 +738,7 @@ const buildHashInput = (payload: Omit<BackupPayload, 'backupMeta'>) => JSON.stri
   orders: sortById(payload.orders),
   machines: sortById(payload.machines),
   releases: sortById(payload.releases),
+  operationLogs: sortById(payload.operationLogs),
   settings: payload.settings
 });
 
@@ -503,6 +757,7 @@ const parseCounts = (file: DriveBackupFile | null): BackupCounts | null => {
       orders: Number(counts.orders) || 0,
       machines: Number(counts.machines) || 0,
       releases: Number(counts.releases) || 0,
+      operationLogs: Number(counts.operationLogs) || 0,
       images: Number(counts.images) || 0,
       totalRecords: Number(counts.totalRecords) || 0
     };
@@ -516,31 +771,42 @@ const loadGoogleIdentityScript = () => new Promise<void>((resolve, reject) => {
     resolve();
     return;
   }
+  if (googleIdentityScriptPromise) {
+    googleIdentityScriptPromise.then(resolve).catch(reject);
+    return;
+  }
   const existing = document.querySelector<HTMLScriptElement>('script[data-google-identity]');
   if (existing) {
     existing.addEventListener('load', () => resolve(), { once: true });
     existing.addEventListener('error', () => reject(new Error('Google Identity 載入失敗')), { once: true });
     return;
   }
-  const script = document.createElement('script');
-  script.src = 'https://accounts.google.com/gsi/client';
-  script.async = true;
-  script.defer = true;
-  script.dataset.googleIdentity = 'true';
-  script.onload = () => resolve();
-  script.onerror = () => reject(new Error('Google Identity 載入失敗'));
-  document.head.appendChild(script);
+  googleIdentityScriptPromise = new Promise<void>((scriptResolve, scriptReject) => {
+    const script = document.createElement('script');
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.async = true;
+    script.defer = true;
+    script.dataset.googleIdentity = 'true';
+    script.onload = () => scriptResolve();
+    script.onerror = () => scriptReject(new Error('Google Identity 載入失敗'));
+    document.head.appendChild(script);
+  });
+  googleIdentityScriptPromise.then(resolve).catch(reject);
 });
 
 const requestGoogleDriveToken = async () => {
-  if (!GOOGLE_CLIENT_ID) {
+  const clientId = getGoogleClientId();
+  if (!clientId) {
     throw new Error('尚未設定 VITE_GOOGLE_CLIENT_ID，請先建立 Google OAuth Client ID 後填入 Vercel 環境變數。');
   }
-  await loadGoogleIdentityScript();
+  if (!window.google?.accounts?.oauth2) {
+    loadGoogleIdentityScript().catch(() => {});
+    throw new Error('Google 授權元件尚未載入完成，請等 1 秒後再按一次。');
+  }
 
   return new Promise<string>((resolve, reject) => {
     const tokenClient = window.google.accounts.oauth2.initTokenClient({
-      client_id: GOOGLE_CLIENT_ID,
+      client_id: clientId,
       scope: GOOGLE_DRIVE_SCOPE,
       prompt: '',
       callback: (response: any) => {
@@ -552,6 +818,7 @@ const requestGoogleDriveToken = async () => {
           reject(new Error('沒有取得 Google Drive 權杖'));
           return;
         }
+        storeDriveToken(response.access_token, Number(response.expires_in) || 3600);
         resolve(response.access_token);
       },
       error_callback: (error: any) => reject(new Error(error?.message || 'Google 授權失敗'))
@@ -573,6 +840,19 @@ const driveFetch = async (url: string, token: string, init: RequestInit = {}) =>
     throw new Error(`Google Drive API 失敗 (${response.status})：${text}`);
   }
   return response;
+};
+
+const validateDriveToken = async (token: string) => {
+  const response = await fetch(`https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=${encodeURIComponent(token)}`);
+  if (!response.ok) {
+    throw new Error('Google Drive token 驗證失敗，請重新授權。');
+  }
+  const info = await response.json();
+  const scopes = typeof info.scope === 'string' ? info.scope.split(/\s+/) : [];
+  if (!scopes.includes(GOOGLE_DRIVE_SCOPE)) {
+    throw new Error('Google Drive 授權範圍不足，請重新授權並允許 Drive 備份權限。');
+  }
+  return info;
 };
 
 const listDriveBackups = async (token: string): Promise<DriveBackupFile[]> => {
@@ -643,9 +923,62 @@ const downloadDriveBackup = async (token: string, fileId: string) => {
 const getDriveErrorMessage = (err: unknown) => {
   const message = err instanceof Error ? err.message : String(err);
   if (message.toLowerCase().includes('popup')) {
-    return 'Google 授權視窗被瀏覽器阻擋。請允許此網站開啟彈出視窗後再試一次。';
+    return 'Google 授權視窗被瀏覽器阻擋，系統將改用同頁授權。';
   }
   return message;
+};
+
+const isDrivePopupError = (err: unknown) => {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.toLowerCase().includes('popup');
+};
+
+const isDriveAuthError = (err: unknown) => {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes('Google Drive API 失敗 (401)') ||
+    message.includes('Invalid Credentials') ||
+    message.includes('token 驗證失敗') ||
+    message.includes('授權範圍不足');
+};
+
+type DriveRedirectAction = 'upload' | 'download' | 'refresh';
+
+const startGoogleDriveRedirect = (action: DriveRedirectAction) => {
+  const clientId = getGoogleClientId();
+  if (!clientId) {
+    throw new Error('尚未設定 Google OAuth Client ID');
+  }
+  const state = crypto.randomUUID();
+  sessionStorage.setItem(GOOGLE_DRIVE_REDIRECT_STATE_KEY, state);
+  sessionStorage.setItem(GOOGLE_DRIVE_REDIRECT_ACTION_KEY, action);
+
+  const redirectUri = getGoogleAuthRedirectUri();
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    response_type: 'token',
+    scope: GOOGLE_DRIVE_SCOPE,
+    include_granted_scopes: 'true',
+    state
+  });
+  window.location.assign(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
+};
+
+const consumeGoogleDriveRedirect = (): { token: string; action: DriveRedirectAction } | null => {
+  if (!window.location.hash.includes('access_token=')) return null;
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  const token = params.get('access_token');
+  const expiresIn = Number(params.get('expires_in')) || 3600;
+  const state = params.get('state');
+  const expectedState = sessionStorage.getItem(GOOGLE_DRIVE_REDIRECT_STATE_KEY);
+  const action = sessionStorage.getItem(GOOGLE_DRIVE_REDIRECT_ACTION_KEY) as DriveRedirectAction | null;
+  sessionStorage.removeItem(GOOGLE_DRIVE_REDIRECT_STATE_KEY);
+  sessionStorage.removeItem(GOOGLE_DRIVE_REDIRECT_ACTION_KEY);
+  window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.search}`);
+
+  if (!token || !state || state !== expectedState || !action) return null;
+  storeDriveToken(token, expiresIn);
+  return { token, action };
 };
 
 // --- Components ---
@@ -829,6 +1162,61 @@ const BottomNav = ({ activeTab, setActiveTab }: { activeTab: string, setActiveTa
   );
 };
 
+const BackupStatusBanner = ({
+  latestLocalAt,
+  lastBackupAt,
+  lastDriveBackupAt,
+  driveEnabled,
+  driveLoading,
+  onUpload,
+  onOpenSettings
+}: {
+  latestLocalAt: string | null;
+  lastBackupAt?: string;
+  lastDriveBackupAt?: string;
+  driveEnabled: boolean;
+  driveLoading: boolean;
+  onUpload: () => void;
+  onOpenSettings: () => void;
+}) => {
+  const localStale = isBackupStale(latestLocalAt, lastBackupAt);
+  const driveStale = isBackupStale(latestLocalAt, lastDriveBackupAt);
+  if (!latestLocalAt || (!localStale && !driveStale)) return null;
+
+  return (
+    <div className="mb-6 rounded-3xl border border-amber-200 bg-amber-50 p-4 text-amber-900 shadow-sm">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start gap-3">
+          <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-600" />
+          <div>
+            <p className="text-sm font-bold">目前有尚未備份的本地資料</p>
+            <p className="mt-1 text-xs font-medium text-amber-800/75">
+              最新資料：{formatDateTime(latestLocalAt)}。本機備份：{lastBackupAt ? formatDateTime(lastBackupAt) : '尚無'}；雲端備份：{lastDriveBackupAt ? formatDateTime(lastDriveBackupAt) : '尚無'}。
+            </p>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          {driveEnabled && (
+            <button
+              onClick={onUpload}
+              disabled={driveLoading}
+              className="rounded-xl bg-amber-600 px-4 py-2 text-xs font-bold text-white disabled:opacity-50"
+            >
+              {driveLoading ? '上傳中' : '立即上傳'}
+            </button>
+          )}
+          <button
+            onClick={onOpenSettings}
+            className="rounded-xl bg-white px-4 py-2 text-xs font-bold text-amber-800"
+          >
+            備份設定
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // --- Tab Components ---
 
 const CreateOrder = ({ 
@@ -853,6 +1241,7 @@ const CreateOrder = ({
   const [callTime, setCallTime] = useState(() => getCurrentDateTimeInputValue());
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
+  const [aiVariantDetails, setAiVariantDetails] = useState<Record<string, MachineVariantDetail>>({});
   const [isFullscreenImage, setIsFullscreenImage] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -945,6 +1334,7 @@ const CreateOrder = ({
       const loadExistingMachine = (machine: any, message: string) => {
         setMachineName(machine.name);
         setPrice(machine.defaultPrice);
+        setAiVariantDetails(normalizeVariantDetails(machine.variants || [], machine.variantDetails));
         if (machine.variants && machine.variants.length > 0) {
           setOrderItems(machine.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
         } else {
@@ -1053,7 +1443,7 @@ const CreateOrder = ({
 [既有資料庫優先]
 在產生任何新名稱前，請先比對以下已建立機台與款式。若圖片中的商品屬於既有機台，machineName 必須逐字回傳既有機台名稱，variants 必須優先逐字使用該機台已建立款式，不得另創其他翻譯版本。
 現有機台與款式：
-${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.length > 0 ? m.variants.join('、') : '尚無款式'}`).join('\n')}
+${machines.map(formatMachineForAiPrompt).join('\n')}
 
 [具體指令]
 在開始辨識與翻譯前，請務必先啟動「內部事實查核」程序：
@@ -1070,6 +1460,7 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
 6. 款式名稱不可只輸出角色名稱，也不可只輸出原文翻譯。每一個 variants 項目都必須同時包含「名稱」與「特徵」兩段資訊。
 7. 若圖片款式是「くまのプーさん＆ピグレット」，應輸出「小熊維尼 維尼抱著小豬」，不要只輸出「小熊維尼」或「小熊維尼與小豬」。
 8. 其他格式範例：「史迪奇 抱著醜丫頭」、「杯麵 騎著招財貓」、「辛巴與拉飛奇 拉飛奇抱著辛巴」。請勿包含括號或「檢貨」字樣。
+9. 請同時輸出 variantDetails。每個 variantDetails.name 必須與 variants 內的款式名稱逐字相同。originalName 填日文原文款式名稱；feature 填最容易目視區分的特徵；aliases 填常見別名、錯譯或不同地區用語，例如杯麵可把「大白、Baymax、ベイマックス」放入 aliases，方便之後比對但不要拿來當正式名稱。
 
 [約束條件]
 - 視覺核心優先與字數限制：去除所有行銷贅字。扭蛋系列檢貨標題絕對不可超過 15 個字。單款視覺特徵檢貨名稱應極致精煉，專注描述核心外觀差異，格式為「名稱+特徵」。
@@ -1109,6 +1500,33 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
                   type: Type.STRING,
                   description: "官方或市售參考來源連結；若無可靠來源可留空陣列"
                 }
+              },
+              variantDetails: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: {
+                      type: Type.STRING,
+                      description: "必須與 variants 中的正式款式名稱逐字相同"
+                    },
+                    originalName: {
+                      type: Type.STRING,
+                      description: "圖片或查證來源中的日文原文款式名稱；無法確認時留空字串"
+                    },
+                    feature: {
+                      type: Type.STRING,
+                      description: "肉眼最容易分辨此款的外觀、動作、持物、同伴或姿勢"
+                    },
+                    aliases: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.STRING,
+                        description: "常見別名、錯譯、英文名、日文名或不同地區用語"
+                      }
+                    }
+                  }
+                }
               }
             }
           }
@@ -1126,6 +1544,8 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
       if (text) {
         const result = JSON.parse(text);
         const aiMachineName = result.machineName || '';
+        const aiVariants = normalizeVariantNames(result.variants || (result.variant ? [result.variant] : []));
+        const detectedVariantDetails = normalizeAiVariantDetails(aiVariants, result.variantDetails);
         const normalizeMachineName = (value: string) => value.toLowerCase().replace(/[\s　・･\-—＿_（）()【】\[\]]+/g, '');
         
         // 檢查 AI 回傳的機台名稱是否已存在；若只是空格或標點差異，也優先沿用既有資料。
@@ -1140,6 +1560,10 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
         if (existingMachineByName) {
           setMachineName(existingMachineByName.name);
           setPrice(existingMachineByName.defaultPrice);
+          setAiVariantDetails({
+            ...normalizeVariantDetails(existingMachineByName.variants || [], existingMachineByName.variantDetails),
+            ...detectedVariantDetails
+          });
           if (existingMachineByName.variants && existingMachineByName.variants.length > 0) {
             setOrderItems(existingMachineByName.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
           } else {
@@ -1148,8 +1572,9 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
           showToast(`AI 辨識為已有機台「${existingMachineByName.name}」，已載入既有款式`, 'success');
         } else {
           if (aiMachineName) setMachineName(aiMachineName);
-          if (result.variants && result.variants.length > 0) {
-            setOrderItems(result.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
+          setAiVariantDetails(detectedVariantDetails);
+          if (aiVariants.length > 0) {
+            setOrderItems(aiVariants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
           } else if (result.variant) {
             setOrderItems([{ id: crypto.randomUUID(), variant: result.variant, quantity: 1, isEco: false }]);
           } else {
@@ -1264,16 +1689,19 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
       let existingOrder: Order | undefined;
       let newCustomerRef: any = null;
       let newCustomerBase: Omit<Customer, 'id'> | null = null;
+      let orderCustomerName = trimmedName;
 
       if (totalAddedQuantity > 0) {
         // 1. Find or Create Customer
-        let customer = customers.find(c => c.name.replace(/\s+/g, '') === trimmedName);
+        let customer = findCustomerByName(customers, trimmedName);
         customerId = customer?.id;
+        orderCustomerName = customer?.name || trimmedName;
 
         if (!customer) {
           const newCustRef = dbDoc('customers');
           const newCust: Omit<Customer, 'id'> = {
-            name: trimmedName,
+            name: orderCustomerName,
+            aliases: [],
             totalSpent: 0,
             totalItems: 0,
             createdAt: now,
@@ -1335,7 +1763,7 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
           const orderRef = dbDoc('orders');
           const newOrder: Omit<Order, 'id'> = {
             customerId: customerId!,
-            customerName: trimmedName,
+            customerName: orderCustomerName,
             items: updatedItems,
             totalAmount: totalAddedAmount,
             status: 'pending',
@@ -1359,9 +1787,17 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
       const machine = machines.find(m => m.name === machineName);
       if (machine) {
         const variantsToAdd = Array.from(newVariantsToSave).filter(v => !machine.variants.includes(v));
+        const nextVariants = variantsToAdd.length > 0 ? [...machine.variants, ...variantsToAdd] : machine.variants;
+        const mergedVariantDetails = normalizeVariantDetails(nextVariants, {
+          ...normalizeVariantDetails(machine.variants || [], machine.variantDetails),
+          ...aiVariantDetails
+        });
         const updates: any = { updatedAt: now };
         if (variantsToAdd.length > 0) {
-          updates.variants = [...machine.variants, ...variantsToAdd];
+          updates.variants = nextVariants;
+        }
+        if (Object.keys(aiVariantDetails).length > 0 || variantsToAdd.length > 0) {
+          updates.variantDetails = mergedVariantDetails;
         }
         if (uploadedImage && machine.imageUrl !== uploadedImage) {
           updates.imageUrl = uploadedImage;
@@ -1375,6 +1811,7 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
           name: machineName,
           defaultPrice: parseInt(price as any) || 0,
           variants: Array.from(newVariantsToSave),
+          variantDetails: normalizeVariantDetails(Array.from(newVariantsToSave), aiVariantDetails),
           createdAt: now,
           updatedAt: now
         };
@@ -1385,6 +1822,15 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
       }
 
       await batch.commit();
+      await addOperationLog(
+        totalAddedQuantity > 0 ? 'order_create' : 'machine_create',
+        totalAddedQuantity > 0 ? 'order' : 'machine',
+        totalAddedQuantity > 0
+          ? `${trimmedName} 新增 ${totalAddedQuantity} 顆，NT$${totalAddedAmount}`
+          : `建立機台資料：${machineName}`,
+        totalAddedQuantity > 0 ? trimmedName : machineName,
+        { machineName, quantity: totalAddedQuantity, amount: totalAddedAmount, mode, callTime: orderCallTime }
+      );
       showToast(totalAddedQuantity > 0 ? '訂單已更新/建立！' : '機台資料已建立！');
       setCallTime(getCurrentDateTimeInputValue());
 
@@ -1394,6 +1840,7 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
         setMachineName('');
         setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
         setUploadedImage(null);
+        setAiVariantDetails({});
       } else if (mode === 'same_item') {
         // Keep items, clear customer
         setCustomerName('');
@@ -1405,6 +1852,7 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
         setMachineName('');
         setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
         setUploadedImage(null);
+        setAiVariantDetails({});
         setActiveTab('create');
       }
     } catch (err: any) {
@@ -1418,7 +1866,7 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
     }
   };
 
-  const customerSuggestions = Array.from(new Set(customers.map(c => c.name)));
+  const customerSuggestions = getCustomerNameSuggestions(customers);
   const machineSuggestions = Array.from(new Set([
     ...machines.map(m => m.name),
     ...orders.flatMap(o => o.items.map(i => i.machineName))
@@ -1501,6 +1949,7 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
               onClick={(e) => {
                 e.stopPropagation();
                 setUploadedImage(null);
+                setAiVariantDetails({});
               }}
               className="absolute top-2 right-2 p-2 bg-white/80 hover:bg-white rounded-full shadow-sm text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
             >
@@ -1512,7 +1961,13 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
         <div className="grid grid-cols-1 gap-4 mb-4">
           <SuggestiveInput 
             value={machineName}
-            onChange={setMachineName}
+            onChange={(value) => {
+              setMachineName(value);
+              const selected = machines.find(m => m.name === value);
+              if (selected) {
+                setAiVariantDetails(normalizeVariantDetails(selected.variants || [], selected.variantDetails));
+              }
+            }}
             placeholder="輸入機台名稱 (例: 吉伊卡哇)"
             suggestions={machineSuggestions}
           />
@@ -1580,6 +2035,34 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
             <Plus className="w-4 h-4" /> 新增款式
           </button>
         </div>
+
+        {Object.keys(aiVariantDetails).length > 0 && (
+          <div className="mb-6 rounded-2xl bg-primary-blue/5 p-4">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <p className="text-xs font-bold text-primary-blue">AI 已填入款式辨識資料</p>
+              <p className="text-[10px] font-bold text-ink/35">儲存後可到機台編輯修改</p>
+            </div>
+            <div className="space-y-2">
+              {Array.from(new Set(orderItems.map(item => item.variant.trim()).filter(Boolean)))
+                .map(variant => {
+                  const detail = aiVariantDetails[variant];
+                  if (!detail) return null;
+                  return (
+                    <div key={variant} className="rounded-xl bg-card-white p-3 text-xs">
+                      <p className="font-bold text-ink">{variant}</p>
+                      <p className="mt-1 text-ink/50">
+                        {[
+                          detail.originalName ? `原文：${detail.originalName}` : '',
+                          detail.feature ? `特徵：${detail.feature}` : '',
+                          detail.aliases?.length ? `別名：${detail.aliases.join('、')}` : ''
+                        ].filter(Boolean).join(' / ') || '已建立預設辨識資料'}
+                      </p>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+        )}
         
         <div className="flex flex-wrap gap-2 mb-6">
           {Object.keys(settings?.priceMap || DEFAULT_PRICE_MAP).map(p => parseInt(p)).sort((a, b) => a - b).map(p => (
@@ -2100,7 +2583,9 @@ const CustomersList = ({
     const pairs: [Customer, Customer][] = [];
     for (let i = 0; i < customers.length; i++) {
       for (let j = i + 1; j < customers.length; j++) {
-        if (isSimilarName(customers[i].name, customers[j].name)) {
+        const leftNames = [customers[i].name, ...(customers[i].aliases || [])];
+        const rightNames = [customers[j].name, ...(customers[j].aliases || [])];
+        if (leftNames.some(left => rightNames.some(right => isSimilarName(left, right)))) {
           pairs.push([customers[i], customers[j]]);
         }
       }
@@ -2137,7 +2622,7 @@ const CustomersList = ({
   };
 
   const sortedCustomers = [...customers]
-    .filter(c => c.name.toLowerCase().includes(searchTerm.toLowerCase()))
+    .filter(c => [c.name, ...(c.aliases || [])].some(name => name.toLowerCase().includes(searchTerm.toLowerCase())))
     .sort((a, b) => {
       if (sortBy === 'name') {
         return a.name.localeCompare(b.name, 'zh-Hant');
@@ -2233,6 +2718,11 @@ const CustomersList = ({
                 <div>
                   <h4 className="font-bold text-ink">{customer.name}</h4>
                   <p className="text-xs text-ink/40">共 {customer.totalItems || 0} 顆</p>
+                  {(customer.aliases || []).length > 0 && (
+                    <p className="mt-1 max-w-[180px] truncate text-[10px] font-medium text-primary-blue/70">
+                      別名：{(customer.aliases || []).join('、')}
+                    </p>
+                  )}
                 </div>
               </div>
               <div className="flex items-center gap-4">
@@ -2366,6 +2856,9 @@ const MachineEditModal = ({
   const [name, setName] = useState(machine.name);
   const [price, setPrice] = useState(machine.defaultPrice.toString());
   const [variantList, setVariantList] = useState<string[]>(machine.variants || []);
+  const [variantDetails, setVariantDetails] = useState<Record<string, MachineVariantDetail>>(
+    normalizeVariantDetails(machine.variants || [], machine.variantDetails)
+  );
   const [newVariant, setNewVariant] = useState('');
   const [editingVariantIndex, setEditingVariantIndex] = useState<number | null>(null);
   const [editingVariantValue, setEditingVariantValue] = useState('');
@@ -2523,13 +3016,23 @@ const MachineEditModal = ({
 
   const addVariant = () => {
     if (newVariant.trim() && !variantList.includes(newVariant.trim())) {
-      setVariantList([...variantList, newVariant.trim()]);
+      const variantName = newVariant.trim();
+      setVariantList([...variantList, variantName]);
+      setVariantDetails(prev => ({
+        ...prev,
+        [variantName]: prev[variantName] || { name: variantName, aliases: [], active: true }
+      }));
       setNewVariant('');
     }
   };
 
   const removeVariant = (v: string) => {
     setVariantList(variantList.filter(item => item !== v));
+    setVariantDetails(prev => {
+      const next = { ...prev };
+      delete next[v];
+      return next;
+    });
   };
 
   const startEditingVariant = (index: number, value: string) => {
@@ -2546,6 +3049,13 @@ const MachineEditModal = ({
         const newList = [...variantList];
         newList[editingVariantIndex] = newVal;
         setVariantList(newList);
+        setVariantDetails(prev => {
+          const next = { ...prev };
+          const previousDetail = next[oldVal] || { name: oldVal, aliases: [], active: true };
+          delete next[oldVal];
+          next[newVal] = { ...previousDetail, name: newVal };
+          return next;
+        });
         
         const originalName = Object.keys(variantMapping).find(key => variantMapping[key] === oldVal) || oldVal;
         setVariantMapping(prev => ({ ...prev, [originalName]: newVal }));
@@ -2568,6 +3078,7 @@ const MachineEditModal = ({
       name,
       defaultPrice: parseInt(price),
       variants: variantList,
+      variantDetails: normalizeVariantDetails(variantList, variantDetails),
       imageUrl: uploadedImage
     }, machine.name, variantMapping, syncWithOrders);
     onClose();
@@ -2701,6 +3212,73 @@ const MachineEditModal = ({
               </button>
             </div>
           </div>
+
+          {variantList.length > 0 && (
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-xs font-bold text-ink/40 uppercase tracking-widest">款式辨識資料</label>
+                <span className="text-xs text-ink/40">提供 AI 比對既有款式，避免重複翻譯</span>
+              </div>
+              <div className="space-y-3">
+                {variantList.map(variant => {
+                  const detail = variantDetails[variant] || { name: variant, aliases: [], active: true };
+                  return (
+                    <div key={variant} className="p-4 bg-card-white border border-divider rounded-2xl space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="font-bold text-ink text-sm">{variant}</div>
+                        <label className="flex items-center gap-2 text-xs font-bold text-ink/50">
+                          <input
+                            type="checkbox"
+                            checked={detail.active !== false}
+                            onChange={(e) => setVariantDetails(prev => ({
+                              ...prev,
+                              [variant]: { ...detail, active: e.target.checked }
+                            }))}
+                          />
+                          啟用
+                        </label>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <input
+                          type="text"
+                          placeholder="原文名稱，例如 ベイマックス＆モチ"
+                          className="px-3 py-2 bg-background rounded-xl border-none text-sm"
+                          value={detail.originalName || ''}
+                          onChange={(e) => setVariantDetails(prev => ({
+                            ...prev,
+                            [variant]: { ...detail, originalName: e.target.value }
+                          }))}
+                        />
+                        <input
+                          type="text"
+                          placeholder="目視特徵，例如 杯麵抱著三色貓"
+                          className="px-3 py-2 bg-background rounded-xl border-none text-sm"
+                          value={detail.feature || ''}
+                          onChange={(e) => setVariantDetails(prev => ({
+                            ...prev,
+                            [variant]: { ...detail, feature: e.target.value }
+                          }))}
+                        />
+                        <input
+                          type="text"
+                          placeholder="別名，用 、 或逗號分隔"
+                          className="px-3 py-2 bg-background rounded-xl border-none text-sm"
+                          value={(detail.aliases || []).join('、')}
+                          onChange={(e) => setVariantDetails(prev => ({
+                            ...prev,
+                            [variant]: {
+                              ...detail,
+                              aliases: e.target.value.split(/[、,，]/).map(alias => alias.trim()).filter(Boolean)
+                            }
+                          }))}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           <div className="pt-6 border-t border-divider">
             <h4 className="text-sm font-bold text-ink/40 uppercase tracking-widest mb-4">這台機台的扭蛋紀錄</h4>
@@ -2972,6 +3550,7 @@ const MachineManagement = ({
               name: machineName,
               defaultPrice: guessedPrice,
               variants: variantsFromOrders,
+              variantDetails: createDefaultVariantDetails(variantsFromOrders),
               createdAt: now,
               updatedAt: now
             });
@@ -2997,6 +3576,7 @@ const MachineManagement = ({
       name,
       defaultPrice: parseInt(price) || 0,
       variants: variantList,
+      variantDetails: createDefaultVariantDetails(variantList),
       createdAt: now,
       updatedAt: now
     };
@@ -3226,6 +3806,7 @@ const MachineManagement = ({
                     name: machineName,
                     defaultPrice: guessedPrice ? parseInt(guessedPrice) : 0,
                     variants: variantsFromOrders,
+                    variantDetails: createDefaultVariantDetails(variantsFromOrders),
                     imageUrl: null
                   });
                 }
@@ -3269,9 +3850,15 @@ const MachineManagement = ({
                       <p className="text-xs text-ink/40 mb-2">預設金額: ¥{config.defaultPrice}</p>
                       {viewMode !== 'grid-sm' && (
                         <div className="flex flex-wrap gap-1">
-                          {(config.variants || []).map((v: string) => (
-                            <span key={v} className="px-2 py-1 bg-background rounded text-[10px] font-bold text-ink/60">{v}</span>
-                          ))}
+                          {(config.variants || []).map((v: string) => {
+                            const detail = normalizeVariantDetails([v], config.variantDetails)[v];
+                            const title = [v, detail.feature, detail.originalName, ...(detail.aliases || [])].filter(Boolean).join(' / ');
+                            return (
+                              <span key={v} title={title} className="px-2 py-1 bg-background rounded text-[10px] font-bold text-ink/60">
+                                {detail.feature ? `${v}：${detail.feature}` : v}
+                              </span>
+                            );
+                          })}
                         </div>
                       )}
                     </>
@@ -3325,7 +3912,68 @@ const CustomerDetailView = ({
   const [releaseQuantity, setReleaseQuantity] = useState(1);
   const [isEditingName, setIsEditingName] = useState(false);
   const [editedName, setEditedName] = useState(customer.name);
+  const [newAlias, setNewAlias] = useState('');
   const [itemSortBy, setItemSortBy] = useState<'time' | 'machine'>('machine');
+
+  const buildCurrentViewSnapshot = (): RestoreSnapshot => {
+    const { id: settingsId, ...settingsPayload } = normalizeSettings('global', settings || {});
+    return {
+      customers,
+      orders,
+      machines,
+      releases,
+      settings: settings ? settingsPayload : null,
+      createdAt: new Date().toISOString()
+    };
+  };
+
+  useEffect(() => {
+    setEditedName(customer.name);
+  }, [customer.id, customer.name]);
+
+  const saveCustomerAliases = async (nextAliases: string[]) => {
+    const aliases = normalizeCustomerAliases(nextAliases)
+      .filter(alias => normalizeCustomerNameKey(alias) !== normalizeCustomerNameKey(customer.name));
+    const duplicateCustomer = customers.find(other =>
+      other.id !== customer.id && aliases.some(alias => customerMatchesName(other, alias))
+    );
+
+    if (duplicateCustomer) {
+      showToast(`別名已屬於顧客 ${duplicateCustomer.name}`, 'error');
+      return;
+    }
+
+    try {
+      const undoSnapshot = buildCurrentViewSnapshot();
+      await updateDoc(dbDoc('customers', customer.id), { aliases });
+      await addOperationLog('customer_alias_update', 'customer', `${customer.name} 更新別名`, customer.name, {
+        undoSnapshot,
+        aliases
+      });
+      showToast('顧客別名已更新');
+    } catch (err) {
+      handleLocalDataError(err, OperationType.WRITE, `customers/${customer.id}`);
+    }
+  };
+
+  const addCustomerAlias = () => {
+    const alias = newAlias.trim();
+    if (!alias) return;
+    if (normalizeCustomerNameKey(alias) === normalizeCustomerNameKey(customer.name)) {
+      showToast('別名不能和顧客主名稱相同', 'error');
+      return;
+    }
+    if ((customer.aliases || []).some(existing => normalizeCustomerNameKey(existing) === normalizeCustomerNameKey(alias))) {
+      showToast('這個別名已存在', 'error');
+      return;
+    }
+    saveCustomerAliases([...(customer.aliases || []), alias]);
+    setNewAlias('');
+  };
+
+  const removeCustomerAlias = (alias: string) => {
+    saveCustomerAliases((customer.aliases || []).filter(existing => existing !== alias));
+  };
 
   const handleSaveName = async () => {
     const newName = editedName.replace(/\s+/g, '');
@@ -3337,12 +3985,19 @@ const CustomerDetailView = ({
       setIsEditingName(false);
       return;
     }
+    const duplicateCustomer = customers.find(other => other.id !== customer.id && customerMatchesName(other, newName));
+    if (duplicateCustomer) {
+      showToast(`這個名稱已屬於顧客 ${duplicateCustomer.name}`, 'error');
+      return;
+    }
 
     try {
+      const undoSnapshot = buildCurrentViewSnapshot();
       const batch = writeBatch(db);
       
       // Update customer doc
-      batch.update(dbDoc('customers', customer.id), { name: newName });
+      const nextAliases = normalizeCustomerAliases([...(customer.aliases || []), customer.name]).filter(alias => normalizeCustomerNameKey(alias) !== normalizeCustomerNameKey(newName));
+      batch.update(dbDoc('customers', customer.id), { name: newName, aliases: nextAliases });
       
       // Update all orders for this customer
       customerOrders.forEach(order => {
@@ -3356,6 +4011,11 @@ const CustomerDetailView = ({
       });
 
       await batch.commit();
+      await addOperationLog('customer_rename', 'customer', `${customer.name} 改名為 ${newName}`, newName, {
+        undoSnapshot,
+        oldName: customer.name,
+        newName
+      });
       showToast('顧客名稱已更新');
       setIsEditingName(false);
     } catch (err) {
@@ -3446,17 +4106,20 @@ const CustomerDetailView = ({
     // @ts-ignore
     const rawIds = item.rawIds || [item.id];
 
-    if (trimmedTarget === customer.name.replace(/\s+/g, '')) {
+    const targetCust = findCustomerByName(customers, trimmedTarget);
+    const targetDisplayName = targetCust?.name || trimmedTarget;
+
+    if (customerMatchesName(customer, trimmedTarget)) {
       showToast('不能轉讓給原顧客自己！', 'error');
       return;
     }
 
     try {
+      const undoSnapshot = buildCurrentViewSnapshot();
       const batch = writeBatch(db);
       const now = new Date().toISOString();
 
       // 1. Find or create target customer
-      let targetCust = customers.find(c => c.name.replace(/\s+/g, '') === trimmedTarget);
       let targetId = targetCust?.id;
       let createdTargetCustomerRef: any = null;
 
@@ -3540,7 +4203,7 @@ const CustomerDetailView = ({
         batch.set(newOrderRef, {
           id: newOrderRef.id,
           customerId: targetId!,
-          customerName: trimmedTarget,
+          customerName: targetDisplayName,
           items: [safeTransferredItem],
           totalAmount: transferSubtotal,
           status: 'pending',
@@ -3550,7 +4213,8 @@ const CustomerDetailView = ({
       }
       if (createdTargetCustomerRef) {
         batch.set(createdTargetCustomerRef, {
-          name: trimmedTarget,
+          name: targetDisplayName,
+          aliases: targetDisplayName === trimmedTarget ? [] : [trimmedTarget],
           totalSpent: transferSubtotal,
           totalItems: transferQuantity,
           createdAt: now,
@@ -3567,8 +4231,15 @@ const CustomerDetailView = ({
       setTransferringItem(null);
       setTargetCustomerName('');
       setTransferQuantity(1);
-      showToast(`已成功轉讓給 ${trimmedTarget}`);
+      showToast(`已成功轉讓給 ${targetDisplayName}`);
       await batch.commit();
+      await addOperationLog('transfer', 'order', `${customer.name} 轉讓 ${transferQuantity} 顆給 ${targetDisplayName}`, `${customer.name} -> ${targetDisplayName}`, {
+        undoSnapshot,
+        machineName: item.machineName,
+        variant: item.variant,
+        quantity: transferQuantity,
+        amount: transferSubtotal
+      });
     } catch (err: any) {
       console.error("Transfer Error:", err);
       if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
@@ -3587,6 +4258,7 @@ const CustomerDetailView = ({
       const rawIds = item.rawIds || [item.id];
       const existing = releases.find(r => r.orderId === orderId && rawIds.includes(r.itemId) && r.status === 'pending');
       if (existing) {
+        const undoSnapshot = buildCurrentViewSnapshot();
         showToast('已取消釋出');
         const order = orders.find(o => o.id === orderId);
         if (order) {
@@ -3605,6 +4277,12 @@ const CustomerDetailView = ({
         } else {
           await deleteDoc(dbDoc('releases', existing.id));
         }
+        await addOperationLog('release_cancel', 'release', `${customer.name} 取消釋出 ${item.machineName}`, customer.name, {
+          undoSnapshot,
+          machineName: item.machineName,
+          variant: item.variant,
+          quantity: existing.quantity
+        });
       } else {
         setReleasingItem({ orderId, item: { ...item, id: rawIds[0] } });
         setReleaseQuantity(item.quantity);
@@ -3619,6 +4297,7 @@ const CustomerDetailView = ({
     const { orderId, item } = releasingItem;
     const confirmedReleaseQuantity = Math.max(1, Math.min(Number(releaseQuantity) || 1, item.quantity));
     try {
+      const undoSnapshot = buildCurrentViewSnapshot();
       const now = new Date().toISOString();
       const releaseRef = dbDoc('releases');
       const rawIds = (item as any).rawIds || [item.id];
@@ -3655,6 +4334,12 @@ const CustomerDetailView = ({
       } else {
         await setDoc(releaseRef, releaseData);
       }
+      await addOperationLog('release_create', 'release', `${customer.name} 釋出 ${confirmedReleaseQuantity} 顆 ${item.machineName}`, customer.name, {
+        undoSnapshot,
+        machineName: item.machineName,
+        variant: item.variant,
+        quantity: confirmedReleaseQuantity
+      });
     } catch (err: any) {
       if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
         showToast('釋出失敗：資料庫免費額度已滿', 'error');
@@ -3713,7 +4398,7 @@ const CustomerDetailView = ({
     return grouped;
   };
 
-  const exchangeTargetCustomer = customers.find(c => c.name.replace(/\s+/g, '') === exchangeTargetCustomerName.replace(/\s+/g, ''));
+  const exchangeTargetCustomer = findCustomerByName(customers, exchangeTargetCustomerName);
   const exchangeTargetItems = exchangeTargetCustomer
     ? orders
         .filter(o => o.customerId === exchangeTargetCustomer.id && o.status === 'pending')
@@ -3796,6 +4481,7 @@ const CustomerDetailView = ({
     const nextTargetTotal = nextTargetItems.reduce((sum, item) => sum + item.subtotal, 0);
 
     try {
+      const undoSnapshot = buildCurrentViewSnapshot();
       const batch = writeBatch(db);
       batch.update(dbDoc('orders', sourceOrder.id), {
         items: nextSourceItems,
@@ -3822,6 +4508,13 @@ const CustomerDetailView = ({
       setExchangeTargetCustomerName('');
       setSelectedExchangeItem(null);
       showToast(`已與 ${targetCustomer.name} 完成交換`);
+      await addOperationLog('exchange', 'order', `${customer.name} 與 ${targetCustomer.name} 完成交換`, `${customer.name} <-> ${targetCustomer.name}`, {
+        undoSnapshot,
+        sourceMachineName: exchangingItem.item.machineName,
+        sourceVariant: exchangingItem.item.variant,
+        targetMachineName: selectedExchangeItem.item.machineName,
+        targetVariant: selectedExchangeItem.item.variant
+      });
     } catch (err) {
       setExchangingItem(null);
       setSelectedExchangeItem(null);
@@ -3908,6 +4601,47 @@ const CustomerDetailView = ({
       </header>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-6 pb-32">
+        <div className="bg-card-white p-5 rounded-3xl card-shadow">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest">顧客別名</h3>
+            <span className="text-[10px] font-bold text-ink/30">新增訂單、轉讓、交換會一起比對</span>
+          </div>
+          <div className="flex flex-wrap gap-2 mb-4">
+            {(customer.aliases || []).length === 0 ? (
+              <span className="text-xs font-medium text-ink/30">尚未設定別名</span>
+            ) : (
+              (customer.aliases || []).map(alias => (
+                <span key={alias} className="inline-flex items-center gap-1 rounded-xl bg-primary-blue/10 px-3 py-1.5 text-xs font-bold text-primary-blue">
+                  {alias}
+                  <button
+                    onClick={() => removeCustomerAlias(alias)}
+                    className="rounded-full p-0.5 hover:bg-primary-blue/10"
+                    title="移除別名"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))
+            )}
+          </div>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={newAlias}
+              onChange={(e) => setNewAlias(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && addCustomerAlias()}
+              placeholder="加入 IG、FB、LINE 暱稱..."
+              className="min-w-0 flex-1 rounded-xl border-none bg-background px-4 py-3 text-sm font-medium text-ink outline-none focus:ring-2 focus:ring-primary-blue"
+            />
+            <button
+              onClick={addCustomerAlias}
+              className="rounded-xl bg-ink px-4 py-3 text-sm font-bold text-white"
+            >
+              新增別名
+            </button>
+          </div>
+        </div>
+
         {customerOrders.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-center">
             <Package className="w-12 h-12 text-ink/20 mb-4" />
@@ -4225,7 +4959,7 @@ const CustomerDetailView = ({
                       setSelectedExchangeItem(null);
                     }}
                     placeholder="輸入或選擇顧客名稱..."
-                    suggestions={customers.filter(c => c.id !== customer.id).map(c => c.name)}
+                    suggestions={getCustomerNameSuggestions(customers.filter(c => c.id !== customer.id))}
                   />
                 </div>
 
@@ -4308,7 +5042,7 @@ const CustomerDetailView = ({
                 value={targetCustomerName}
                 onChange={setTargetCustomerName}
                 placeholder="輸入顧客名稱..."
-                suggestions={customers.map(c => c.name)}
+                suggestions={getCustomerNameSuggestions(customers)}
               />
               <div className="flex gap-2 pt-6">
                 <button onClick={() => setTransferringItem(null)} className="flex-1 py-4 bg-background text-ink rounded-2xl font-bold">取消</button>
@@ -4814,6 +5548,18 @@ const Dashboard = ({
   const [transferringRelease, setTransferringRelease] = useState<any | null>(null);
   const [targetCustomerName, setTargetCustomerName] = useState('');
 
+  const buildDashboardSnapshot = (): RestoreSnapshot => {
+    const { id: settingsId, ...settingsPayload } = normalizeSettings('global', settings || {});
+    return {
+      customers,
+      orders,
+      machines,
+      releases,
+      settings: settings ? settingsPayload : null,
+      createdAt: new Date().toISOString()
+    };
+  };
+
   const handleReleaseTransfer = async () => {
     if (!transferringRelease) return;
     const trimmedTarget = targetCustomerName.replace(/\s+/g, '');
@@ -4824,17 +5570,21 @@ const Dashboard = ({
     const release = transferringRelease;
     const releaseEntries = Array.isArray(release.entries) ? release.entries : [release];
 
-    if (trimmedTarget === release.customerName.replace(/\s+/g, '')) {
+    const targetCust = findCustomerByName(customers, trimmedTarget);
+    const targetDisplayName = targetCust?.name || trimmedTarget;
+    const sourceCustomer = findCustomerByName(customers, release.customerName);
+
+    if ((sourceCustomer && targetCust?.id === sourceCustomer.id) || normalizeCustomerNameKey(trimmedTarget) === normalizeCustomerNameKey(release.customerName)) {
       showToast('不能轉讓給原顧客自己！', 'error');
       return;
     }
 
     try {
+      const undoSnapshot = buildDashboardSnapshot();
       const batch = writeBatch(db);
       const now = new Date().toISOString();
 
       // 1. Find or create target customer
-      let targetCust = customers.find(c => c.name.replace(/\s+/g, '') === trimmedTarget);
       let targetId = targetCust?.id;
       let createdTargetCustomerRef: any = null;
 
@@ -4849,7 +5599,7 @@ const Dashboard = ({
         status: 'completed',
         transferredAt: now,
         transferTargetCustomerId: targetId,
-        transferTargetCustomerName: trimmedTarget
+        transferTargetCustomerName: targetDisplayName
       }));
       
       // 3. Update the original order item and customer
@@ -4960,7 +5710,7 @@ const Dashboard = ({
           batch.set(newOrderRef, {
             id: newOrderRef.id,
             customerId: targetId!,
-            customerName: trimmedTarget,
+            customerName: targetDisplayName,
             items: [{ ...transferredItem, createdAt: now, updatedAt: now, transferAt: now }],
             totalAmount: transferredItem.subtotal,
             status: 'pending',
@@ -4970,7 +5720,8 @@ const Dashboard = ({
         }
         if (createdTargetCustomerRef) {
           batch.set(createdTargetCustomerRef, {
-            name: trimmedTarget,
+            name: targetDisplayName,
+            aliases: targetDisplayName === trimmedTarget ? [] : [trimmedTarget],
             totalSpent: totalTransferSubtotal,
             totalItems: totalTransferQuantity,
             createdAt: now,
@@ -4992,6 +5743,13 @@ const Dashboard = ({
       setTransferringRelease(null);
       setTargetCustomerName('');
       await batch.commit();
+      await addOperationLog('release_transfer', 'release', `${release.customerName} 釋出成交轉讓 ${totalTransferQuantity} 顆給 ${targetDisplayName}`, `${release.customerName} -> ${targetDisplayName}`, {
+        undoSnapshot,
+        machineName: release.machineName,
+        variant: release.variant,
+        quantity: totalTransferQuantity,
+        amount: totalTransferSubtotal
+      });
     } catch (err: any) {
       if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
         showToast('轉移失敗：資料庫免費額度已滿', 'error');
@@ -5150,7 +5908,7 @@ const Dashboard = ({
                 value={targetCustomerName}
                 onChange={setTargetCustomerName}
                 placeholder="輸入顧客名稱..."
-                suggestions={customers.map(c => c.name)}
+                suggestions={getCustomerNameSuggestions(customers)}
               />
               <div className="flex gap-2 pt-6">
                 <button onClick={() => {
@@ -5181,6 +5939,12 @@ const SettingsView = ({
   clearImportPreview,
   importInProgress,
   driveStatus,
+  operationLogs,
+  restoreFromLog,
+  googleClientId,
+  saveGoogleClientId,
+  connectGoogleDrive,
+  logoutGoogleDrive,
   uploadDriveData,
   downloadDriveData,
   refreshDriveBackups
@@ -5188,13 +5952,19 @@ const SettingsView = ({
   settings: SystemSettings | null, 
   showToast: (m: string, t?: 'success' | 'error') => void,
   setConfirmModal: (m: any) => void,
-  exportData: () => void,
+  exportData: () => Promise<void>,
   importData: (e: React.ChangeEvent<HTMLInputElement>) => void,
   importPreview: PreparedImport | null,
   confirmImport: () => void,
   clearImportPreview: () => void,
   importInProgress: boolean,
   driveStatus: DriveBackupStatus,
+  operationLogs: OperationLog[],
+  restoreFromLog: (log: OperationLog, mode?: 'restore' | 'undo') => void,
+  googleClientId: string,
+  saveGoogleClientId: (clientId: string) => void,
+  connectGoogleDrive: () => void,
+  logoutGoogleDrive: () => void,
   uploadDriveData: (force?: boolean) => void,
   downloadDriveData: () => void,
   refreshDriveBackups: () => void
@@ -5203,6 +5973,7 @@ const SettingsView = ({
   const [priceMap, setPriceMap] = useState<Record<number, any>>(settings?.priceMap || DEFAULT_PRICE_MAP);
   const [newJpy, setNewJpy] = useState('');
   const [newTwd, setNewTwd] = useState('');
+  const [googleClientIdInput, setGoogleClientIdInput] = useState(googleClientId);
 
   useEffect(() => {
     if (settings) {
@@ -5212,10 +5983,14 @@ const SettingsView = ({
   }, [settings]);
 
   useEffect(() => {
-    if (GOOGLE_CLIENT_ID) {
+    setGoogleClientIdInput(googleClientId);
+  }, [googleClientId]);
+
+  useEffect(() => {
+    if (googleClientId) {
       loadGoogleIdentityScript().catch(() => {});
     }
-  }, []);
+  }, [googleClientId]);
 
   const saveSettings = async () => {
     try {
@@ -5230,6 +6005,7 @@ const SettingsView = ({
         notificationTemplate: template,
         priceMap: cleanedPriceMap
       }, { merge: true });
+      await addOperationLog('settings_update', 'settings', '設定已更新');
     } catch (err) {
       handleLocalDataError(err, OperationType.WRITE, 'settings/global');
     }
@@ -5254,10 +6030,11 @@ const SettingsView = ({
     setConfirmModal({
       show: true,
       title: '刪除全部資料',
-      message: '確定要刪除所有訂單、機台、顧客與釋出資料嗎？通知範本與價格設定會保留。',
+      message: '確定要刪除所有訂單、機台、顧客與釋出資料嗎？系統會先下載一份本機 JSON 備份，通知範本、價格設定與操作紀錄會保留。',
       type: 'danger',
       onConfirm: async () => {
         try {
+          await exportData();
           const collections = ['orders', 'machines', 'customers', 'releases'];
           for (const colName of collections) {
             const snapshot = await getDocs(col(colName));
@@ -5274,6 +6051,7 @@ const SettingsView = ({
             }
           }
           window.dispatchEvent(new CustomEvent('cuibo-clear-local-data'));
+          await addOperationLog('clear_data', 'system', '已刪除全部資料，通知範本與操作紀錄已保留');
           showToast('全部資料已清除，通知範本已保留');
         } catch (err: any) {
           if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
@@ -5450,7 +6228,39 @@ const SettingsView = ({
           </button>
         </div>
 
-        {!GOOGLE_CLIENT_ID && (
+        <div className="mb-4 rounded-2xl bg-background p-4">
+          <label className="mb-2 block text-xs font-bold text-ink/40">Google OAuth Client ID</label>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <input
+              type="text"
+              value={googleClientIdInput}
+              onChange={(e) => setGoogleClientIdInput(e.target.value)}
+              placeholder="xxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com"
+              className="min-w-0 flex-1 rounded-xl border-none bg-card-white px-4 py-3 text-sm font-medium text-ink outline-none focus:ring-2 focus:ring-primary-blue"
+            />
+            <button
+              onClick={() => saveGoogleClientId(googleClientIdInput)}
+              className="rounded-xl bg-ink px-4 py-3 text-sm font-bold text-white"
+            >
+              儲存
+            </button>
+          </div>
+          <p className="mt-2 text-[10px] font-medium leading-relaxed text-ink/35">
+            Client ID 不是密碼，可存在前端；Google Cloud 的 Authorized JavaScript origins 與 Authorized redirect URIs 仍需加入目前網址。
+          </p>
+          <div className="mt-3 grid gap-2">
+            <div className="rounded-xl bg-card-white p-3">
+              <p className="text-[10px] font-bold text-ink/35">Authorized JavaScript origins</p>
+              <code className="mt-1 block break-all text-xs font-bold text-ink">{getGoogleAuthOrigin()}</code>
+            </div>
+            <div className="rounded-xl bg-card-white p-3">
+              <p className="text-[10px] font-bold text-ink/35">Authorized redirect URIs</p>
+              <code className="mt-1 block break-all text-xs font-bold text-ink">{getGoogleAuthRedirectUri()}</code>
+            </div>
+          </div>
+        </div>
+
+        {!googleClientId && (
           <div className="mb-4 rounded-2xl bg-amber-50 p-4 text-xs font-medium leading-relaxed text-amber-800">
             尚未設定 Google OAuth Client ID。請在 Vercel 環境變數加入 <code className="font-bold">VITE_GOOGLE_CLIENT_ID</code>，
             並把目前網址加入 Google Cloud OAuth 的 Authorized JavaScript origins。
@@ -5459,8 +6269,24 @@ const SettingsView = ({
 
         <div className="grid grid-cols-2 gap-3">
           <button
+            onClick={connectGoogleDrive}
+            disabled={driveStatus.loading || !googleClientId}
+            className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors disabled:opacity-50"
+          >
+            <CheckCircle2 className="w-5 h-5" />
+            <span className="text-[10px] font-bold">{driveStatus.connected ? '已連線雲端' : '登入雲端'}</span>
+          </button>
+          <button
+            onClick={logoutGoogleDrive}
+            disabled={driveStatus.loading || !driveStatus.connected}
+            className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-red-500/60 hover:bg-red-500/5 transition-colors disabled:opacity-50"
+          >
+            <LogOut className="w-5 h-5" />
+            <span className="text-[10px] font-bold">登出雲端</span>
+          </button>
+          <button
             onClick={() => uploadDriveData(false)}
-            disabled={driveStatus.loading || !GOOGLE_CLIENT_ID}
+            disabled={driveStatus.loading || !googleClientId}
             className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors disabled:opacity-50"
           >
             <Upload className="w-5 h-5" />
@@ -5468,7 +6294,7 @@ const SettingsView = ({
           </button>
           <button
             onClick={downloadDriveData}
-            disabled={driveStatus.loading || !GOOGLE_CLIENT_ID}
+            disabled={driveStatus.loading || !googleClientId}
             className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors disabled:opacity-50"
           >
             <Download className="w-5 h-5" />
@@ -5492,6 +6318,53 @@ const SettingsView = ({
           )}
           {driveStatus.latest?.createdTime && (
             <p className="mt-3 text-xs font-medium text-ink/45">最新雲端備份：{formatDateTime(driveStatus.latest.createdTime)}</p>
+          )}
+        </div>
+      </div>
+
+      <div className="bg-card-white p-6 rounded-3xl card-shadow">
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest">操作紀錄</h3>
+          <span className="rounded-lg bg-background px-2 py-1 text-[10px] font-bold text-ink/40">最近 {Math.min(operationLogs.length, 20)} 筆</span>
+        </div>
+        <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+          {operationLogs.length === 0 ? (
+            <p className="rounded-2xl bg-background p-4 text-center text-sm font-medium text-ink/30">目前沒有操作紀錄</p>
+          ) : (
+            operationLogs.slice(0, 20).map(log => (
+              <div key={log.id} className="rounded-2xl bg-background p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="break-words text-sm font-bold text-ink">{log.message}</p>
+                    <p className="mt-1 text-[10px] font-bold uppercase tracking-wide text-ink/35">
+                      {log.action} / {log.targetType}
+                      {log.details?.restorePointExpired ? ' / 還原點已過期' : ''}
+                    </p>
+                  </div>
+                  <div className="flex flex-shrink-0 flex-col items-end gap-2">
+                    <span className="text-xs font-bold text-ink/40">{formatDateTime(log.createdAt)}</span>
+                    {log.details?.undoSnapshot && (
+                      <button
+                        onClick={() => restoreFromLog(log, 'undo')}
+                        className="rounded-lg bg-orange-500 px-3 py-1.5 text-[10px] font-bold text-white"
+                      >
+                        復原此操作
+                      </button>
+                    )}
+                    {log.details?.restoreSnapshot ? (
+                      <button
+                        onClick={() => restoreFromLog(log, 'restore')}
+                        className="rounded-lg bg-primary-blue px-3 py-1.5 text-[10px] font-bold text-white"
+                      >
+                        還原到這裡
+                      </button>
+                    ) : !log.details?.undoSnapshot ? (
+                      <span className="rounded-lg bg-card-white px-3 py-1.5 text-[10px] font-bold text-ink/30">不可還原</span>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            ))
           )}
         </div>
       </div>
@@ -5519,6 +6392,7 @@ export default function App() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [machines, setMachines] = useState<any[]>([]);
   const [releases, setReleases] = useState<any[]>([]);
+  const [operationLogs, setOperationLogs] = useState<OperationLog[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [importPreview, setImportPreview] = useState<PreparedImport | null>(null);
   const [importInProgress, setImportInProgress] = useState(false);
@@ -5527,8 +6401,9 @@ export default function App() {
     loading: false,
     latest: null,
     files: [],
-    message: GOOGLE_CLIENT_ID ? '尚未連線 Google Drive' : '尚未設定 Google OAuth Client ID'
+    message: getGoogleClientId() ? '尚未連線 Google Drive' : '尚未設定 Google OAuth Client ID'
   });
+  const [googleClientId, setGoogleClientId] = useState(() => getGoogleClientId());
   
   // UI State
   const [isPrinting, setIsPrinting] = useState(false);
@@ -5561,6 +6436,7 @@ export default function App() {
       name: data.name,
       defaultPrice: data.defaultPrice,
       variants: data.variants,
+      variantDetails: normalizeVariantDetails(data.variants || [], data.variantDetails),
       imageUrl: data.imageUrl,
       updatedAt: now
     };
@@ -5736,6 +6612,68 @@ export default function App() {
     toastTimeoutRef.current = setTimeout(() => setToast(t => ({ ...t, show: false })), 3000);
   }, []);
 
+  const saveGoogleClientId = useCallback((clientId: string) => {
+    const trimmed = clientId.trim();
+    if (trimmed) {
+      localStorage.setItem(GOOGLE_CLIENT_ID_STORAGE_KEY, trimmed);
+      setGoogleClientId(trimmed);
+      setDriveStatus(prev => ({ ...prev, message: 'Google OAuth Client ID 已儲存，尚未連線 Google Drive' }));
+      loadGoogleIdentityScript().catch(() => {});
+      showToast('Google OAuth Client ID 已儲存');
+    } else {
+      localStorage.removeItem(GOOGLE_CLIENT_ID_STORAGE_KEY);
+      clearDriveToken();
+      setGoogleClientId(DEFAULT_GOOGLE_CLIENT_ID || '');
+      setDriveStatus(prev => ({ ...prev, latest: null, files: [], message: DEFAULT_GOOGLE_CLIENT_ID ? '已改用 Vercel 環境變數 Client ID' : '尚未設定 Google OAuth Client ID' }));
+      showToast('已清除本機 Google OAuth Client ID');
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    if (googleClientId) {
+      loadGoogleIdentityScript().catch(() => {});
+      const token = getStoredDriveToken();
+      if (token) {
+        setDriveStatus(prev => ({ ...prev, connected: true, message: 'Google Drive 已登入，可直接備份' }));
+      }
+    }
+  }, [googleClientId]);
+
+  const connectGoogleDrive = useCallback(async () => {
+    if (!googleClientId) {
+      showToast('尚未設定 Google OAuth Client ID', 'error');
+      return;
+    }
+    setDriveStatus(prev => ({ ...prev, loading: true, message: '正在登入 Google Drive...' }));
+    try {
+      const token = getStoredDriveToken() || await requestGoogleDriveToken();
+      await validateDriveToken(token);
+      setDriveStatus(prev => ({ ...prev, connected: true, loading: false, message: 'Google Drive 已登入，可直接備份' }));
+      showToast('Google Drive 已登入');
+    } catch (err) {
+      if (isDrivePopupError(err)) {
+        startGoogleDriveRedirect('refresh');
+        return;
+      }
+      clearDriveToken();
+      const message = getDriveErrorMessage(err);
+      setDriveStatus(prev => ({ ...prev, connected: false, loading: false, message }));
+      showToast(`Google Drive 登入失敗：${message}`, 'error');
+    }
+  }, [googleClientId, showToast]);
+
+  const logoutGoogleDrive = useCallback(() => {
+    clearDriveToken();
+    setDriveStatus(prev => ({
+      ...prev,
+      connected: false,
+      latest: null,
+      files: [],
+      message: 'Google Drive 已登出'
+    }));
+    showToast('Google Drive 已登出');
+  }, [showToast]);
+
   // --- Auth & Data Sync ---
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
@@ -5765,6 +6703,10 @@ export default function App() {
       setReleases(safeDocs(snap).map(d => normalizeRelease(d.id, d.data())));
     }, (err) => handleLocalDataError(err, OperationType.LIST, 'releases'));
 
+    const unsubOperationLogs = onSnapshot(query(col('operationLogs'), orderBy('createdAt', 'desc')), (snap) => {
+      setOperationLogs(safeDocs(snap).map(d => normalizeOperationLog(d.id, d.data())).slice(0, 100));
+    }, (err) => handleLocalDataError(err, OperationType.LIST, 'operationLogs'));
+
     const unsubSettings = onSnapshot(dbDoc('settings', 'global'), (snap) => {
       if (snap.exists()) {
         setSettings(normalizeSettings(snap.id, snap.data()));
@@ -5784,6 +6726,7 @@ export default function App() {
       unsubOrders();
       unsubMachines();
       unsubReleases();
+      unsubOperationLogs();
       unsubSettings();
     };
   }, [user]);
@@ -5886,7 +6829,7 @@ export default function App() {
 
   const buildBackupData = async (): Promise<BackupPayload> => {
     const exportedAt = new Date().toISOString();
-    const basePayload = { customers, orders, settings, machines, releases, exportedAt };
+    const basePayload = { customers, orders, settings, machines, releases, operationLogs, exportedAt };
     const dataHash = await sha256(buildHashInput(basePayload));
     return {
       ...basePayload,
@@ -5895,7 +6838,7 @@ export default function App() {
         backupVersion: 1,
         deviceId: getDeviceId(),
         dataHash,
-        counts: getBackupCounts(customers, orders, machines, releases)
+        counts: getBackupCounts(customers, orders, machines, releases, operationLogs)
       }
     };
   };
@@ -5909,16 +6852,21 @@ export default function App() {
     a.download = `cuibo_gasha_backup_${format(toZonedTime(new Date(), TAIWAN_TZ), 'yyyyMMdd')}.json`;
     a.click();
     URL.revokeObjectURL(url);
+    const now = new Date().toISOString();
+    await setDoc(dbDoc('settings', 'global'), { lastBackupAt: now }, { merge: true });
+    await addOperationLog('backup_export', 'local_file', '已匯出本機 JSON 備份', a.download, data.backupMeta.counts);
   };
 
-  const refreshDriveBackups = useCallback(async () => {
-    if (!GOOGLE_CLIENT_ID) {
+  const refreshDriveBackups = useCallback(async (tokenOverride?: string, allowRedirectRetry = true) => {
+    if (!googleClientId) {
       setDriveStatus(prev => ({ ...prev, message: '尚未設定 Google OAuth Client ID' }));
       return;
     }
     setDriveStatus(prev => ({ ...prev, loading: true, message: '正在讀取 Google Drive 備份...' }));
     try {
-      const token = await requestGoogleDriveToken();
+      const token = tokenOverride || getStoredDriveToken() || await requestGoogleDriveToken();
+      await validateDriveToken(token);
+      storeDriveToken(token);
       const files = await listDriveBackups(token);
       setDriveStatus({
         connected: true,
@@ -5928,19 +6876,29 @@ export default function App() {
         message: files[0] ? `已找到 ${files.length} 份雲端備份` : 'Google Drive 尚無備份'
       });
     } catch (err) {
+      if (isDrivePopupError(err)) {
+        startGoogleDriveRedirect('refresh');
+        return;
+      }
+      if (allowRedirectRetry && isDriveAuthError(err)) {
+        clearDriveToken();
+        showToast('Google 授權已失效，正在重新授權', 'error');
+        startGoogleDriveRedirect('refresh');
+        return;
+      }
       const message = getDriveErrorMessage(err);
       setDriveStatus(prev => ({ ...prev, loading: false, message }));
       showToast(`雲端備份讀取失敗：${message}`, 'error');
     }
-  }, []);
+  }, [googleClientId]);
 
-  const uploadDriveData = useCallback(async (force = false) => {
-    if (!GOOGLE_CLIENT_ID) {
+  const uploadDriveData = useCallback(async (force = false, tokenOverride?: string, allowRedirectRetry = true) => {
+    if (!googleClientId) {
       showToast('尚未設定 Google OAuth Client ID', 'error');
       return;
     }
 
-    const localCounts = getBackupCounts(customers, orders, machines, releases);
+    const localCounts = getBackupCounts(customers, orders, machines, releases, operationLogs);
     const cloudCounts = parseCounts(driveStatus.latest);
     if (!force && localCounts.totalRecords === 0 && (cloudCounts?.totalRecords || 0) > 0) {
       setConfirmModal({
@@ -5959,12 +6917,15 @@ export default function App() {
 
     setDriveStatus(prev => ({ ...prev, loading: true, message: '正在上傳 Google Drive 備份...' }));
     try {
-      const token = await requestGoogleDriveToken();
+      const token = tokenOverride || getStoredDriveToken() || await requestGoogleDriveToken();
+      await validateDriveToken(token);
+      storeDriveToken(token);
       const payload = await buildBackupData();
       const uploaded = await uploadDriveBackup(token, payload);
       const files = await listDriveBackups(token);
       const now = new Date().toISOString();
       await setDoc(dbDoc('settings', 'global'), { lastBackupAt: now, lastDriveBackupAt: now }, { merge: true });
+      await addOperationLog('backup_upload', 'google_drive', 'Google Drive 備份已上傳', uploaded.name, payload.backupMeta.counts);
       setDriveStatus({
         connected: true,
         loading: false,
@@ -5974,21 +6935,33 @@ export default function App() {
       });
       showToast('Google Drive 備份已上傳');
     } catch (err) {
+      if (isDrivePopupError(err)) {
+        startGoogleDriveRedirect('upload');
+        return;
+      }
+      if (allowRedirectRetry && isDriveAuthError(err)) {
+        clearDriveToken();
+        showToast('Google 授權已失效，正在重新授權', 'error');
+        startGoogleDriveRedirect('upload');
+        return;
+      }
       const message = getDriveErrorMessage(err);
       setDriveStatus(prev => ({ ...prev, loading: false, message }));
       showToast(`雲端備份上傳失敗：${message}`, 'error');
     }
-  }, [customers, orders, machines, releases, settings, driveStatus.latest]);
+  }, [customers, orders, machines, releases, operationLogs, settings, driveStatus.latest, googleClientId]);
 
-  const downloadDriveData = useCallback(async () => {
-    if (!GOOGLE_CLIENT_ID) {
+  const downloadDriveData = useCallback(async (tokenOverride?: string, allowRedirectRetry = true) => {
+    if (!googleClientId) {
       showToast('尚未設定 Google OAuth Client ID', 'error');
       return;
     }
 
     setDriveStatus(prev => ({ ...prev, loading: true, message: '正在讀取 Google Drive 備份...' }));
     try {
-      const token = await requestGoogleDriveToken();
+      const token = tokenOverride || getStoredDriveToken() || await requestGoogleDriveToken();
+      await validateDriveToken(token);
+      storeDriveToken(token);
       const files = driveStatus.files.length > 0 ? driveStatus.files : await listDriveBackups(token);
       const latest = files[0];
       if (!latest) {
@@ -5998,7 +6971,7 @@ export default function App() {
       }
 
       const cloudCounts = parseCounts(latest);
-      const localCounts = getBackupCounts(customers, orders, machines, releases);
+      const localCounts = getBackupCounts(customers, orders, machines, releases, operationLogs);
       const proceed = async () => {
         setDriveStatus(prev => ({ ...prev, loading: true, message: '正在下載最新雲端備份...' }));
         const data = await downloadDriveBackup(token, latest.id);
@@ -6022,11 +6995,21 @@ export default function App() {
 
       await proceed();
     } catch (err) {
+      if (isDrivePopupError(err)) {
+        startGoogleDriveRedirect('download');
+        return;
+      }
+      if (allowRedirectRetry && isDriveAuthError(err)) {
+        clearDriveToken();
+        showToast('Google 授權已失效，正在重新授權', 'error');
+        startGoogleDriveRedirect('download');
+        return;
+      }
       const message = getDriveErrorMessage(err);
       setDriveStatus(prev => ({ ...prev, loading: false, message }));
       showToast(`雲端備份下載失敗：${message}`, 'error');
     }
-  }, [customers, orders, machines, releases, driveStatus.files]);
+  }, [customers, orders, machines, releases, operationLogs, driveStatus.files, googleClientId]);
 
   const applyPreparedImport = async (prepared: PreparedImport) => {
     try {
@@ -6065,10 +7048,12 @@ export default function App() {
       setOrders(prepared.payload.orders);
       setMachines(prepared.payload.machines);
       setReleases(prepared.payload.releases);
+      setOperationLogs(prepared.payload.operationLogs);
       if (prepared.payload.settings) {
         setSettings({ id: 'global', ...prepared.payload.settings });
       }
       setImportPreview(null);
+      await addOperationLog('import', 'backup', `匯入備份：${prepared.fileName}`, prepared.fileName, prepared.counts);
       showToast('備份資料已匯入');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -6109,6 +7094,131 @@ export default function App() {
   };
 
   const clearImportPreview = () => setImportPreview(null);
+
+  const applyRestoreSnapshot = async (snapshot: RestoreSnapshot) => {
+    let currentBatch = writeBatch(db);
+    let operationCount = 0;
+
+    const checkBatchLimit = async () => {
+      if (operationCount >= 400) {
+        await currentBatch.commit();
+        currentBatch = writeBatch(db);
+        operationCount = 0;
+      }
+    };
+
+    for (const collectionName of ['customers', 'orders', 'machines', 'releases']) {
+      const currentDocs = await getDocs(col(collectionName));
+      for (const item of currentDocs.docs) {
+        currentBatch.delete(item.ref);
+        operationCount++;
+        await checkBatchLimit();
+      }
+    }
+
+    for (const customer of snapshot.customers || []) {
+      const { id, ...rest } = customer;
+      currentBatch.set(dbDoc('customers', id), rest);
+      operationCount++;
+      await checkBatchLimit();
+    }
+
+    for (const order of snapshot.orders || []) {
+      const { id, ...rest } = order;
+      currentBatch.set(dbDoc('orders', id), rest);
+      operationCount++;
+      await checkBatchLimit();
+    }
+
+    for (const machine of snapshot.machines || []) {
+      const { id, ...rest } = machine;
+      currentBatch.set(dbDoc('machines', id), rest);
+      operationCount++;
+      await checkBatchLimit();
+    }
+
+    for (const release of snapshot.releases || []) {
+      const { id, ...rest } = release;
+      currentBatch.set(dbDoc('releases', id), rest);
+      operationCount++;
+      await checkBatchLimit();
+    }
+
+    if (snapshot.settings) {
+      currentBatch.set(dbDoc('settings', 'global'), snapshot.settings, { merge: true });
+      operationCount++;
+      await checkBatchLimit();
+    }
+
+    if (operationCount > 0) {
+      await currentBatch.commit();
+    }
+
+    setCustomers(snapshot.customers || []);
+    setOrders(snapshot.orders || []);
+    setMachines(snapshot.machines || []);
+    setReleases(snapshot.releases || []);
+    if (snapshot.settings) {
+      setSettings({ id: 'global', ...snapshot.settings });
+    }
+  };
+
+  const restoreFromLog = (log: OperationLog, mode: 'restore' | 'undo' = 'restore') => {
+    const snapshot = (mode === 'undo' ? log.details?.undoSnapshot : log.details?.restoreSnapshot) as RestoreSnapshot | undefined;
+    if (!snapshot) {
+      showToast('這筆操作紀錄沒有可用還原點', 'error');
+      return;
+    }
+
+    const counts = getBackupCounts(
+      snapshot.customers || [],
+      snapshot.orders || [],
+      snapshot.machines || [],
+      snapshot.releases || []
+    );
+
+    setConfirmModal({
+      show: true,
+      title: mode === 'undo' ? '復原此操作' : '還原資料',
+      message: `確定要${mode === 'undo' ? '復原' : '把資料還原到'}「${log.message}」${mode === 'undo' ? '這個操作之前' : '這一步'}嗎？目前資料會先自動匯出一份本機備份。還原後會變成：顧客 ${counts.customers}、訂單 ${counts.orders}、機台 ${counts.machines}、釋出 ${counts.releases}。`,
+      type: 'danger',
+      checkboxLabel: mode === 'undo' ? '我確認要復原此操作' : '我確認要還原到這個操作紀錄',
+      onConfirm: async (checked) => {
+        if (!checked) {
+          showToast('已取消還原', 'error');
+          return;
+        }
+        try {
+          await exportData();
+          await applyRestoreSnapshot(snapshot);
+          await addOperationLog(mode === 'undo' ? 'undo' : 'restore', 'operationLog', `${mode === 'undo' ? '已復原操作' : '已還原到'}：${log.message}`, log.targetName, {
+            restoredLogId: log.id,
+            restoredAt: log.createdAt,
+            restoreMode: mode,
+            counts
+          });
+          showToast(mode === 'undo' ? '操作已復原' : '資料已還原');
+        } catch (err) {
+          console.error(err);
+          showToast('還原失敗，請先檢查本機儲存空間', 'error');
+        }
+      }
+    });
+  };
+
+  useEffect(() => {
+    const redirectResult = consumeGoogleDriveRedirect();
+    if (!redirectResult) return;
+
+    showToast('Google 授權完成，正在接續雲端備份操作');
+    if (redirectResult.action === 'upload') {
+      uploadDriveData(false, redirectResult.token, false);
+    } else if (redirectResult.action === 'download') {
+      downloadDriveData(redirectResult.token, false);
+    } else {
+      refreshDriveBackups(redirectResult.token, false);
+    }
+  }, [uploadDriveData, downloadDriveData, refreshDriveBackups, showToast]);
 
   const clearData = async () => {
     setConfirmModal({
@@ -6158,6 +7268,7 @@ export default function App() {
   };
 
   // --- Tab Content ---
+  const latestLocalAt = getLatestDataTime(customers, orders, machines, releases);
 
   // --- Render Helpers ---
   if (loading) return <LoadingScreen />;
@@ -6169,6 +7280,15 @@ export default function App() {
         <Header user={user} activeTab={activeTab} />
         
         <main className="max-w-4xl mx-auto px-6 py-8">
+          <BackupStatusBanner
+            latestLocalAt={latestLocalAt}
+            lastBackupAt={settings?.lastBackupAt}
+            lastDriveBackupAt={settings?.lastDriveBackupAt}
+            driveEnabled={Boolean(googleClientId)}
+            driveLoading={driveStatus.loading}
+            onUpload={() => uploadDriveData(false)}
+            onOpenSettings={() => setActiveTab('settings')}
+          />
           <AnimatePresence mode="wait">
             <motion.div
               key={activeTab}
@@ -6246,6 +7366,12 @@ export default function App() {
                   clearImportPreview={clearImportPreview}
                   importInProgress={importInProgress}
                   driveStatus={driveStatus}
+                  operationLogs={operationLogs}
+                  restoreFromLog={restoreFromLog}
+                  googleClientId={googleClientId}
+                  saveGoogleClientId={saveGoogleClientId}
+                  connectGoogleDrive={connectGoogleDrive}
+                  logoutGoogleDrive={logoutGoogleDrive}
                   uploadDriveData={uploadDriveData}
                   downloadDriveData={downloadDriveData}
                   refreshDriveBackups={refreshDriveBackups}

@@ -4,6 +4,7 @@ export interface Customer {
   phone?: string;
   lineId?: string;
   fbName?: string;
+  aliases?: string[];
   totalSpent: number;
   totalItems: number;
   lastOrderAt: string;
@@ -31,11 +32,20 @@ export interface OrderItem {
   isChecked?: boolean;
 }
 
+export interface MachineVariantDetail {
+  name: string;
+  originalName?: string;
+  feature?: string;
+  aliases?: string[];
+  active?: boolean;
+}
+
 export interface Machine {
   id: string;
   name: string;
   defaultPrice: number;
   variants: string[];
+  variantDetails?: Record<string, MachineVariantDetail>;
   imageUrl?: string;
   createdAt: string;
   updatedAt: string;
@@ -75,4 +85,14 @@ export interface SystemSettings {
   priceMap: Record<number, number>; // JPY to TWD mapping
   lastBackupAt?: string;
   lastDriveBackupAt?: string;
+}
+
+export interface OperationLog {
+  id: string;
+  action: string;
+  targetType: string;
+  targetName?: string;
+  message: string;
+  details?: Record<string, any>;
+  createdAt: string;
 }

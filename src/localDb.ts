@@ -18,6 +18,9 @@ function sanitizeDoc(path: string, data: any) {
 
   if (name === 'customers') {
     next.name = typeof next.name === 'string' ? next.name : '';
+    next.aliases = Array.isArray(next.aliases)
+      ? Array.from(new Set(next.aliases.filter((alias: any) => typeof alias === 'string').map((alias: string) => alias.trim()).filter(Boolean)))
+      : [];
     next.totalSpent = Number(next.totalSpent) || 0;
     next.totalItems = Number(next.totalItems) || 0;
     next.createdAt = typeof next.createdAt === 'string' ? next.createdAt : now;
@@ -59,7 +62,27 @@ function sanitizeDoc(path: string, data: any) {
   if (name === 'machines') {
     next.name = typeof next.name === 'string' ? next.name : '';
     next.defaultPrice = Number(next.defaultPrice) || 0;
-    next.variants = Array.isArray(next.variants) ? next.variants.filter((variant: any) => typeof variant === 'string') : [];
+    next.variants = Array.isArray(next.variants)
+      ? Array.from(new Set(next.variants.filter((variant: any) => typeof variant === 'string').map((variant: string) => variant.trim()).filter(Boolean)))
+      : [];
+    const rawVariantDetails = next.variantDetails && typeof next.variantDetails === 'object' && !Array.isArray(next.variantDetails)
+      ? next.variantDetails
+      : {};
+    next.variantDetails = next.variants.reduce((acc: Record<string, any>, variant: string) => {
+      const raw = rawVariantDetails[variant] && typeof rawVariantDetails[variant] === 'object' && !Array.isArray(rawVariantDetails[variant])
+        ? rawVariantDetails[variant]
+        : {};
+      acc[variant] = {
+        name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : variant,
+        originalName: typeof raw.originalName === 'string' && raw.originalName.trim() ? raw.originalName.trim() : undefined,
+        feature: typeof raw.feature === 'string' && raw.feature.trim() ? raw.feature.trim() : undefined,
+        aliases: Array.isArray(raw.aliases)
+          ? Array.from(new Set(raw.aliases.filter((alias: any) => typeof alias === 'string').map((alias: string) => alias.trim()).filter(Boolean)))
+          : [],
+        active: raw.active === false ? false : true
+      };
+      return acc;
+    }, {});
     next.createdAt = typeof next.createdAt === 'string' ? next.createdAt : now;
     next.updatedAt = typeof next.updatedAt === 'string' ? next.updatedAt : now;
   }
@@ -84,6 +107,16 @@ function sanitizeDoc(path: string, data: any) {
     next.notificationTemplate = typeof next.notificationTemplate === 'string' ? next.notificationTemplate : '';
     next.priceMap = next.priceMap && typeof next.priceMap === 'object' && !Array.isArray(next.priceMap) ? next.priceMap : {};
     next.lastBackupAt = typeof next.lastBackupAt === 'string' ? next.lastBackupAt : now;
+    next.lastDriveBackupAt = typeof next.lastDriveBackupAt === 'string' ? next.lastDriveBackupAt : undefined;
+  }
+
+  if (name === 'operationLogs') {
+    next.action = typeof next.action === 'string' ? next.action : 'unknown';
+    next.targetType = typeof next.targetType === 'string' ? next.targetType : 'system';
+    next.targetName = typeof next.targetName === 'string' ? next.targetName : undefined;
+    next.message = typeof next.message === 'string' ? next.message : '';
+    next.details = next.details && typeof next.details === 'object' && !Array.isArray(next.details) ? next.details : undefined;
+    next.createdAt = typeof next.createdAt === 'string' ? next.createdAt : now;
   }
 
   return next;
