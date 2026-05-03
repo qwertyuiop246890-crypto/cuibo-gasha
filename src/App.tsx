@@ -206,6 +206,8 @@ const fromDateTimeInputValue = (value: string, fallback: string) => {
   return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
 };
 
+const getCurrentDateTimeInputValue = () => toDateTimeInputValue(new Date().toISOString());
+
 const normalizeOrderItem = (item: any): OrderItem => {
   const price = Number(item?.price) || 0;
   const quantity = Number(item?.quantity) || 0;
@@ -848,7 +850,7 @@ const CreateOrder = ({
   const [machineName, setMachineName] = useState('');
   const [price, setPrice] = useState<number>(100);
   const [orderItems, setOrderItems] = useState([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
-  const [callTime, setCallTime] = useState('');
+  const [callTime, setCallTime] = useState(() => getCurrentDateTimeInputValue());
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
   const [isFullscreenImage, setIsFullscreenImage] = useState(false);
@@ -1384,6 +1386,7 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
 
       await batch.commit();
       showToast(totalAddedQuantity > 0 ? '訂單已更新/建立！' : '機台資料已建立！');
+      setCallTime(getCurrentDateTimeInputValue());
 
       // Handle Modes
       if (mode === 'same_cust') {
@@ -1445,14 +1448,14 @@ ${machines.map(m => `- ${m.name}：${Array.isArray(m.variants) && m.variants.len
           suggestions={customerSuggestions}
         />
         <div className="mt-4">
-          <label className="text-xs font-bold text-ink/40 block mb-2">喊單時間（選填）</label>
+          <label className="text-xs font-bold text-ink/40 block mb-2">喊單時間</label>
           <input
             type="datetime-local"
             value={callTime}
             onChange={(e) => setCallTime(e.target.value)}
             className="w-full px-4 py-3 bg-background rounded-xl border-none text-ink outline-none focus:ring-2 focus:ring-primary-blue"
           />
-          <p className="text-[10px] text-ink/30 mt-2">不填會使用建立訂單當下時間。</p>
+          <p className="text-[10px] text-ink/30 mt-2">預設當下時間；新增成功後會自動更新為新的當下時間。</p>
         </div>
       </div>
 
