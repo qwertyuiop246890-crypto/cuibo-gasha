@@ -638,6 +638,14 @@ const downloadDriveBackup = async (token: string, fileId: string) => {
   return response.json();
 };
 
+const getDriveErrorMessage = (err: unknown) => {
+  const message = err instanceof Error ? err.message : String(err);
+  if (message.toLowerCase().includes('popup')) {
+    return 'Google 授權視窗被瀏覽器阻擋。請允許此網站開啟彈出視窗後再試一次。';
+  }
+  return message;
+};
+
 // --- Components ---
 
 const SuggestiveInput = ({ 
@@ -4366,10 +4374,18 @@ type PrintPage = {
   blocks: PrintCustomerBlock[];
 };
 
-const PRINT_PAGE_CAPACITY = 32;
-const PRINT_HEADER_UNITS = 5;
-const PRINT_FOOTER_UNITS = 2;
-const PRINT_BLOCK_GAP_UNITS = 1;
+type PrintSortMode = 'name' | 'amount';
+
+const PRINT_PAGE_CAPACITY = 35;
+const PRINT_HEADER_UNITS = 4.6;
+const PRINT_FOOTER_UNITS = 2.2;
+const PRINT_BLOCK_GAP_UNITS = 0.8;
+
+const estimatePrintItemUnits = (item: OrderItem) => {
+  const machineLines = Math.ceil((item.machineName || '').length / 12);
+  const variantLines = Math.ceil((item.variant || '').length / 13);
+  return Math.max(1.35, Math.max(machineLines, variantLines) * 0.95 + 0.45);
+};
 
 const sortPrintItems = (items: OrderItem[]) => {
   return [...items].sort((a, b) => {
@@ -4382,7 +4398,18 @@ const sortPrintItems = (items: OrderItem[]) => {
   });
 };
 
-const buildPrintPages = (selectedCustomers: Customer[], orders: Order[]): PrintPage[] => {
+const sortPrintCustomers = (selectedCustomers: Customer[], orders: Order[], sortMode: PrintSortMode) => {
+  return [...selectedCustomers].sort((a, b) => {
+    if (sortMode === 'amount') {
+      const aAmount = orders.filter(o => o.customerId === a.id).reduce((sum, order) => sum + order.totalAmount, 0) || a.totalSpent;
+      const bAmount = orders.filter(o => o.customerId === b.id).reduce((sum, order) => sum + order.totalAmount, 0) || b.totalSpent;
+      return bAmount - aAmount || a.name.localeCompare(b.name, 'zh-Hant');
+    }
+    return a.name.localeCompare(b.name, 'zh-Hant');
+  });
+};
+
+const buildPrintPages = (selectedCustomers: Customer[], orders: Order[], sortMode: PrintSortMode): PrintPage[] => {
   const pages: PrintPage[] = [{ blocks: [] }];
   let remaining = PRINT_PAGE_CAPACITY;
 
@@ -4392,7 +4419,7 @@ const buildPrintPages = (selectedCustomers: Customer[], orders: Order[]): PrintP
     remaining = PRINT_PAGE_CAPACITY;
   };
 
-  selectedCustomers.forEach((customer) => {
+  sortPrintCustomers(selectedCustomers, orders, sortMode).forEach((customer) => {
     const customerOrders = orders.filter(o => o.customerId === customer.id);
     const allItems = sortPrintItems(customerOrders.flatMap(o => o.items));
     const totalAmount = customerOrders.reduce((sum, order) => sum + order.totalAmount, 0) || customer.totalSpent;
@@ -4409,16 +4436,28 @@ const buildPrintPages = (selectedCustomers: Customer[], orders: Order[]): PrintP
     let isFirstSegment = true;
 
     while (index < allItems.length) {
-      if (remaining < PRINT_HEADER_UNITS + 1 + PRINT_BLOCK_GAP_UNITS) {
+      const firstItemUnits = estimatePrintItemUnits(allItems[index]);
+      if (remaining < PRINT_HEADER_UNITS + firstItemUnits + PRINT_BLOCK_GAP_UNITS) {
         newPage();
       }
 
-      const availableRows = Math.max(1, remaining - PRINT_HEADER_UNITS - PRINT_BLOCK_GAP_UNITS);
-      const rowsIfLastSegment = Math.max(1, availableRows - PRINT_FOOTER_UNITS);
-      const remainingItems = allItems.length - index;
-      const isLastSegment = remainingItems <= rowsIfLastSegment;
-      const rowsOnThisPage = isLastSegment ? remainingItems : availableRows;
-      const pageItems = allItems.slice(index, index + rowsOnThisPage);
+      const availableUnits = Math.max(firstItemUnits, remaining - PRINT_HEADER_UNITS - PRINT_BLOCK_GAP_UNITS);
+      const availableUnitsIfLast = Math.max(firstItemUnits, availableUnits - PRINT_FOOTER_UNITS);
+      const remainingUnits = allItems.slice(index).reduce((sum, item) => sum + estimatePrintItemUnits(item), 0);
+      const shouldFinishHere = remainingUnits <= availableUnitsIfLast;
+      const rowBudget = shouldFinishHere ? availableUnitsIfLast : availableUnits;
+      const pageItems: OrderItem[] = [];
+      let usedItemUnits = 0;
+
+      while (index + pageItems.length < allItems.length) {
+        const item = allItems[index + pageItems.length];
+        const itemUnits = estimatePrintItemUnits(item);
+        if (pageItems.length > 0 && usedItemUnits + itemUnits > rowBudget) break;
+        pageItems.push(item);
+        usedItemUnits += itemUnits;
+      }
+
+      const isLastSegment = index + pageItems.length >= allItems.length;
 
       currentPage().blocks.push({
         customer,
@@ -4428,7 +4467,7 @@ const buildPrintPages = (selectedCustomers: Customer[], orders: Order[]): PrintP
         totalAmount
       });
 
-      remaining -= PRINT_HEADER_UNITS + pageItems.length + PRINT_BLOCK_GAP_UNITS + (isLastSegment ? PRINT_FOOTER_UNITS : 0);
+      remaining -= PRINT_HEADER_UNITS + usedItemUnits + PRINT_BLOCK_GAP_UNITS + (isLastSegment ? PRINT_FOOTER_UNITS : 0);
       index += pageItems.length;
       isFirstSegment = false;
     }
@@ -4455,33 +4494,33 @@ const PrintCustomerTable = ({ block }: { block: PrintCustomerBlock }) => (
           </th>
         </tr>
         <tr className="border-b-2 border-ink bg-ink/5 text-xs print:bg-transparent">
-          <th className="w-[8%] px-2 py-2 text-center"></th>
-          <th className="w-[40%] px-2 py-2">機台名稱</th>
-          <th className="w-[22%] px-2 py-2">款式</th>
-          <th className="w-[10%] px-2 py-2">單價</th>
-          <th className="w-[8%] px-2 py-2">數量</th>
-          <th className="w-[12%] px-2 py-2 text-right">小計</th>
+          <th className="w-[8%] px-2 py-1.5 text-center"></th>
+          <th className="w-[32%] px-2 py-1.5">機台名稱</th>
+          <th className="w-[28%] px-2 py-1.5">款式</th>
+          <th className="w-[10%] px-2 py-1.5">單價</th>
+          <th className="w-[8%] px-2 py-1.5">數量</th>
+          <th className="w-[14%] px-2 py-1.5 text-right">小計</th>
         </tr>
       </thead>
       <tbody>
         {block.items.length === 0 ? (
           <tr className="border-b border-divider print:border-ink/10">
-            <td colSpan={6} className="px-2 py-4 text-center text-ink/40">沒有明細</td>
+            <td colSpan={6} className="px-2 py-3 text-center text-ink/40">沒有明細</td>
           </tr>
         ) : (
           block.items.map((item, idx) => (
             <tr key={item.id || idx} className="border-b border-divider print:border-ink/10">
-              <td className="px-2 py-1.5 text-center align-middle">
+              <td className="px-2 py-1 text-center align-middle">
                 <div className="mx-auto h-4 w-4 rounded-sm border-2 border-ink/40 print:border-black"></div>
               </td>
-              <td className="px-2 py-1.5">
+              <td className="px-2 py-1">
                 <div className="font-medium leading-tight">{item.machineName}</div>
                 <div className="text-[10px] text-ink/30 print:text-ink/50">{formatDateTime(item.createdAt)}</div>
               </td>
-              <td className="px-2 py-1.5">{item.variant || '-'}</td>
-              <td className="px-2 py-1.5">NT${item.price}</td>
-              <td className="px-2 py-1.5">{item.quantity}</td>
-              <td className="px-2 py-1.5 text-right font-bold">NT${item.subtotal}</td>
+              <td className="px-2 py-1 leading-snug">{item.variant || '-'}</td>
+              <td className="px-2 py-1">NT${item.price}</td>
+              <td className="px-2 py-1">{item.quantity}</td>
+              <td className="px-2 py-1 text-right font-bold">NT${item.subtotal}</td>
             </tr>
           ))
         )}
@@ -4489,8 +4528,8 @@ const PrintCustomerTable = ({ block }: { block: PrintCustomerBlock }) => (
       {block.isLastSegment && (
         <tfoot>
           <tr>
-            <td colSpan={5} className="px-2 py-3 text-right text-sm font-bold">總計：</td>
-            <td className="px-2 py-3 text-right text-lg font-bold text-primary-blue print:text-ink">NT${block.totalAmount}</td>
+            <td colSpan={5} className="px-2 py-2 text-right text-sm font-bold">總計：</td>
+            <td className="px-2 py-2 text-right text-lg font-bold text-primary-blue print:text-ink">NT${block.totalAmount}</td>
           </tr>
         </tfoot>
       )}
@@ -4508,6 +4547,7 @@ const PrintPreview = ({
   onClose: () => void 
 }) => {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [sortMode, setSortMode] = useState<PrintSortMode>('name');
   const printRef = useRef<HTMLDivElement>(null);
   const handlePrint = useReactToPrint({ contentRef: printRef });
 
@@ -4522,23 +4562,56 @@ const PrintPreview = ({
   };
 
   const selectedCustomers = customers.filter(c => selectedIds.includes(c.id));
-  const printPages = buildPrintPages(selectedCustomers, orders);
+  const printPages = buildPrintPages(selectedCustomers, orders, sortMode);
 
   return (
     <div className="space-y-6 pb-24">
       <div className="flex items-center justify-between bg-card-white p-4 rounded-2xl card-shadow">
-        <h2 className="text-xl font-bold text-ink">列印預覽</h2>
-        <button 
-          onClick={() => handlePrint()}
-          disabled={selectedIds.length === 0}
-          className="px-6 py-2 bg-primary-blue text-white rounded-xl font-bold flex items-center gap-2 disabled:opacity-40"
-        >
-          <Printer className="w-4 h-4" /> 列印所選 ({selectedIds.length})
-        </button>
+        <div>
+          <h2 className="text-xl font-bold text-ink">列印預覽</h2>
+          <p className="text-xs font-medium text-ink/40">已啟用預覽，確認版面後再列印。</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="hidden sm:flex rounded-xl bg-background p-1">
+            <button
+              onClick={() => setSortMode('name')}
+              className={cn('px-3 py-2 rounded-lg text-xs font-bold', sortMode === 'name' ? 'bg-card-white text-ink shadow-sm' : 'text-ink/40')}
+            >
+              依名稱
+            </button>
+            <button
+              onClick={() => setSortMode('amount')}
+              className={cn('px-3 py-2 rounded-lg text-xs font-bold', sortMode === 'amount' ? 'bg-card-white text-ink shadow-sm' : 'text-ink/40')}
+            >
+              依金額
+            </button>
+          </div>
+          <button 
+            onClick={() => handlePrint()}
+            disabled={selectedIds.length === 0}
+            className="px-4 sm:px-6 py-2 bg-primary-blue text-white rounded-xl font-bold flex items-center gap-2 disabled:opacity-40"
+          >
+            <Printer className="w-4 h-4" /> 列印所選 ({selectedIds.length})
+          </button>
+        </div>
       </div>
 
       <div className="flex flex-col lg:flex-row gap-6">
         <div className="w-full lg:w-1/3 space-y-2">
+          <div className="flex sm:hidden rounded-xl bg-card-white p-1 card-shadow">
+            <button
+              onClick={() => setSortMode('name')}
+              className={cn('flex-1 px-3 py-2 rounded-lg text-xs font-bold', sortMode === 'name' ? 'bg-background text-ink' : 'text-ink/40')}
+            >
+              依名稱
+            </button>
+            <button
+              onClick={() => setSortMode('amount')}
+              className={cn('flex-1 px-3 py-2 rounded-lg text-xs font-bold', sortMode === 'amount' ? 'bg-background text-ink' : 'text-ink/40')}
+            >
+              依金額
+            </button>
+          </div>
           <button 
             onClick={toggleAll}
             className="w-full py-3 bg-card-white rounded-xl font-bold text-ink text-sm border border-divider mb-4 card-shadow"
@@ -4562,13 +4635,13 @@ const PrintPreview = ({
           </div>
         </div>
 
-        <div className="hidden lg:block w-full lg:w-2/3 bg-ink/5 rounded-3xl p-4 sm:p-8 overflow-y-auto max-h-[70vh]">
+        <div className="w-full lg:w-2/3 bg-ink/5 rounded-3xl p-3 sm:p-8 overflow-y-auto max-h-[70vh]">
           <div ref={printRef} className="space-y-6 print:space-y-0">
             <style>{`
               @media print {
                 @page {
                   size: A4;
-                  margin: 10mm;
+                  margin: 7mm;
                 }
                 body {
                   -webkit-print-color-adjust: exact;
@@ -4586,25 +4659,34 @@ const PrintPreview = ({
                 }
                 .print-page {
                   width: 100%;
-                  min-height: 277mm;
+                  height: 283mm;
                   break-after: page;
                   box-shadow: none !important;
                   margin: 0 !important;
                   padding: 0 !important;
+                  overflow: hidden;
                 }
                 .print-page:last-child {
                   break-after: auto;
                 }
+                .print-page-inner {
+                  gap: 3mm !important;
+                }
+                .print-customer-block th,
+                .print-customer-block td {
+                  padding-top: 1.1mm !important;
+                  padding-bottom: 1.1mm !important;
+                }
               }
             `}</style>
             {printPages.length === 0 ? (
-              <div className="bg-white w-[210mm] min-h-[297mm] mx-auto p-10 shadow-2xl text-center text-ink/40">
+              <div className="bg-white w-full max-w-[210mm] min-h-[297mm] mx-auto p-10 shadow-2xl text-center text-ink/40">
                 請先選擇要列印的顧客
               </div>
             ) : (
               printPages.map((page, pageIndex) => (
-                <div key={pageIndex} className="print-page bg-white w-[210mm] min-h-[297mm] mx-auto p-10 shadow-2xl">
-                  <div className="space-y-5">
+                <div key={pageIndex} className="print-page bg-white w-[210mm] max-w-full min-h-[297mm] mx-auto p-6 sm:p-8 shadow-2xl">
+                  <div className="print-page-inner space-y-3">
                     {page.blocks.map((block, blockIndex) => (
                       <React.Fragment key={`${block.customer.id}-${pageIndex}-${blockIndex}`}>
                         <PrintCustomerTable block={block} />
@@ -5099,6 +5181,12 @@ const SettingsView = ({
       setPriceMap(settings.priceMap || DEFAULT_PRICE_MAP);
     }
   }, [settings]);
+
+  useEffect(() => {
+    if (GOOGLE_CLIENT_ID) {
+      loadGoogleIdentityScript().catch(() => {});
+    }
+  }, []);
 
   const saveSettings = async () => {
     try {
@@ -5811,7 +5899,7 @@ export default function App() {
         message: files[0] ? `已找到 ${files.length} 份雲端備份` : 'Google Drive 尚無備份'
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = getDriveErrorMessage(err);
       setDriveStatus(prev => ({ ...prev, loading: false, message }));
       showToast(`雲端備份讀取失敗：${message}`, 'error');
     }
@@ -5857,7 +5945,7 @@ export default function App() {
       });
       showToast('Google Drive 備份已上傳');
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = getDriveErrorMessage(err);
       setDriveStatus(prev => ({ ...prev, loading: false, message }));
       showToast(`雲端備份上傳失敗：${message}`, 'error');
     }
@@ -5905,7 +5993,7 @@ export default function App() {
 
       await proceed();
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = getDriveErrorMessage(err);
       setDriveStatus(prev => ({ ...prev, loading: false, message }));
       showToast(`雲端備份下載失敗：${message}`, 'error');
     }
