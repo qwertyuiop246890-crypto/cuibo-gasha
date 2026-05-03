@@ -4374,7 +4374,7 @@ type PrintPage = {
   blocks: PrintCustomerBlock[];
 };
 
-type PrintSortMode = 'name' | 'amount';
+type PrintSortMode = 'quantity' | 'name' | 'amount';
 
 const PRINT_PAGE_CAPACITY = 35;
 const PRINT_HEADER_UNITS = 4.6;
@@ -4400,9 +4400,17 @@ const sortPrintItems = (items: OrderItem[]) => {
 
 const sortPrintCustomers = (selectedCustomers: Customer[], orders: Order[], sortMode: PrintSortMode) => {
   return [...selectedCustomers].sort((a, b) => {
+    const aOrders = orders.filter(o => o.customerId === a.id);
+    const bOrders = orders.filter(o => o.customerId === b.id);
+    const aAmount = aOrders.reduce((sum, order) => sum + order.totalAmount, 0) || a.totalSpent;
+    const bAmount = bOrders.reduce((sum, order) => sum + order.totalAmount, 0) || b.totalSpent;
+    const aQuantity = aOrders.reduce((sum, order) => sum + order.items.reduce((itemSum, item) => itemSum + item.quantity, 0), 0) || a.totalItems;
+    const bQuantity = bOrders.reduce((sum, order) => sum + order.items.reduce((itemSum, item) => itemSum + item.quantity, 0), 0) || b.totalItems;
+
+    if (sortMode === 'quantity') {
+      return aQuantity - bQuantity || a.name.localeCompare(b.name, 'zh-Hant');
+    }
     if (sortMode === 'amount') {
-      const aAmount = orders.filter(o => o.customerId === a.id).reduce((sum, order) => sum + order.totalAmount, 0) || a.totalSpent;
-      const bAmount = orders.filter(o => o.customerId === b.id).reduce((sum, order) => sum + order.totalAmount, 0) || b.totalSpent;
       return bAmount - aAmount || a.name.localeCompare(b.name, 'zh-Hant');
     }
     return a.name.localeCompare(b.name, 'zh-Hant');
@@ -4547,7 +4555,7 @@ const PrintPreview = ({
   onClose: () => void 
 }) => {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [sortMode, setSortMode] = useState<PrintSortMode>('name');
+  const [sortMode, setSortMode] = useState<PrintSortMode>('quantity');
   const printRef = useRef<HTMLDivElement>(null);
   const handlePrint = useReactToPrint({ contentRef: printRef });
 
@@ -4574,6 +4582,12 @@ const PrintPreview = ({
         <div className="flex items-center gap-2">
           <div className="hidden sm:flex rounded-xl bg-background p-1">
             <button
+              onClick={() => setSortMode('quantity')}
+              className={cn('px-3 py-2 rounded-lg text-xs font-bold', sortMode === 'quantity' ? 'bg-card-white text-ink shadow-sm' : 'text-ink/40')}
+            >
+              依顆數
+            </button>
+            <button
               onClick={() => setSortMode('name')}
               className={cn('px-3 py-2 rounded-lg text-xs font-bold', sortMode === 'name' ? 'bg-card-white text-ink shadow-sm' : 'text-ink/40')}
             >
@@ -4599,6 +4613,12 @@ const PrintPreview = ({
       <div className="flex flex-col lg:flex-row gap-6">
         <div className="w-full lg:w-1/3 space-y-2">
           <div className="flex sm:hidden rounded-xl bg-card-white p-1 card-shadow">
+            <button
+              onClick={() => setSortMode('quantity')}
+              className={cn('flex-1 px-3 py-2 rounded-lg text-xs font-bold', sortMode === 'quantity' ? 'bg-background text-ink' : 'text-ink/40')}
+            >
+              依顆數
+            </button>
             <button
               onClick={() => setSortMode('name')}
               className={cn('flex-1 px-3 py-2 rounded-lg text-xs font-bold', sortMode === 'name' ? 'bg-background text-ink' : 'text-ink/40')}
