@@ -600,6 +600,20 @@ const fillBlankVariantDetailsOnly = (
   }, {});
 };
 
+const hasBlankVariantRecognitionInfo = (machine: any) => {
+  const variants = normalizeVariantNames(machine?.variants);
+  if (!machine?.imageUrl || variants.length === 0) return false;
+  const rawDetails = machine?.variantDetails && typeof machine.variantDetails === 'object' ? machine.variantDetails : {};
+  return variants.some(variant => {
+    const raw = rawDetails[variant] && typeof rawDetails[variant] === 'object' && !Array.isArray(rawDetails[variant])
+      ? rawDetails[variant]
+      : {};
+    return !optionalText(raw.originalName) ||
+      !optionalText(raw.feature) ||
+      normalizeCustomerAliases(raw.aliases).length === 0;
+  });
+};
+
 const formatMachineForAiPrompt = (machine: any) => {
   const variants = normalizeVariantNames(machine?.variants);
   if (variants.length === 0) return `- ${machine.name}：尚無款式`;
@@ -4028,6 +4042,7 @@ const MachineManagement = ({
   const [machineSearchTerm, setMachineSearchTerm] = useState('');
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
   const [isRecognizing, setIsRecognizing] = useState(false);
+  const [isBulkRecognizing, setIsBulkRecognizing] = useState(false);
   const addMachineFileInputRef = useRef<HTMLInputElement>(null);
 
   // Derive all unique machine names from orders
@@ -4039,63 +4054,66 @@ const MachineManagement = ({
     ...machines.map(m => m.name)
   ])).sort().filter(name => name.toLowerCase().includes(machineSearchTerm.toLowerCase()));
 
-  const autoInitializeUnsetMachines = async () => {
-    const unsetMachines = allMachineNames.filter(name => !machines.find(m => m.name === name));
-    if (unsetMachines.length === 0) {
-      showToast('沒有未設定的機台', 'success');
+  const bulkFillBlankRecognitionInfo = async () => {
+    const targetMachines = machines.filter(hasBlankVariantRecognitionInfo);
+    if (targetMachines.length === 0) {
+      showToast('沒有需要補空白辨識資料的機台', 'success');
       return;
     }
 
     setConfirmModal({
       show: true,
-      title: '一鍵初始化未設定機台',
-      message: `將自動為 ${unsetMachines.length} 個未設定的機台建立預設資料（自動抓取訂單中的款式與金額）。確定要執行嗎？`,
-      onConfirm: async (checked?: boolean) => {
-        if (!checked) {
-          showToast('已取消刪除：需要勾選確認才會清空資料', 'error');
-          return;
-        }
+      title: '一鍵重新辨識空白資訊',
+      message: `將重新辨識 ${targetMachines.length} 台已有圖片的機台，只補款式辨識資料空白欄位，不會更改機台名稱、金額、款式名稱或訂單資料。確定要執行嗎？`,
+      onConfirm: async () => {
+        setIsBulkRecognizing(true);
         try {
-          const batch = writeBatch(db);
+          const undoSnapshot = await createRestoreSnapshot();
           const now = new Date().toISOString();
-          let addedCount = 0;
+          let updatedCount = 0;
+          let skippedCount = 0;
 
-          unsetMachines.forEach(machineName => {
-            // Try to guess JPY price from last order
-            let guessedPrice = 0;
-            const lastOrderWithMachine = orders.find(o => o.items.some(i => i.machineName === machineName));
-            if (lastOrderWithMachine) {
-              const item = lastOrderWithMachine.items.find(i => i.machineName === machineName);
-              if (item) {
-                const ntPrice = item.price;
-                const map = settings?.priceMap || DEFAULT_PRICE_MAP;
-                const guessedJpy = Object.keys(map).find(k => map[parseInt(k)] === ntPrice) || 
-                                  Object.keys(map).find(k => map[parseInt(k)] === ntPrice - 10);
-                if (guessedJpy) guessedPrice = parseInt(guessedJpy);
+          for (const machine of targetMachines) {
+            try {
+              showToast(`正在辨識：${machine.name}`);
+              const result = await requestMachineRecognition(machine.imageUrl, machines);
+              const variants = normalizeVariantNames(machine.variants);
+              const nextDetails = fillBlankVariantDetailsOnly(
+                variants,
+                machine.variantDetails,
+                result.variants,
+                result.variantDetails
+              );
+              const currentDetails = normalizeVariantDetails(variants, machine.variantDetails);
+              if (JSON.stringify(nextDetails) === JSON.stringify(currentDetails)) {
+                skippedCount++;
+                continue;
               }
+              await updateDoc(dbDoc('machines', machine.id), {
+                variantDetails: nextDetails,
+                updatedAt: now
+              });
+              updatedCount++;
+            } catch (err) {
+              console.error(err);
+              skippedCount++;
             }
+          }
 
-            // Extract variants
-            const variantsFromOrders = Array.from(new Set(
-              orders.flatMap(o => o.items.filter(i => i.machineName === machineName).map(i => i.variant || ''))
-            )).filter(v => v && !v.includes('(環保)'));
-
-            const newDocRef = dbDoc('machines');
-            batch.set(newDocRef, {
-              name: machineName,
-              defaultPrice: guessedPrice,
-              variants: variantsFromOrders,
-              variantDetails: createDefaultVariantDetails(variantsFromOrders),
-              createdAt: now,
-              updatedAt: now
+          if (updatedCount > 0) {
+            await addOperationLog('machine_variant_details_update', 'machine', `一鍵補上 ${updatedCount} 台機台的空白款式辨識資料`, '批次機台辨識', {
+              undoSnapshot,
+              updatedCount,
+              skippedCount
             });
-            addedCount++;
-          });
+          }
 
-      showToast(`成功初始化 ${addedCount} 個機台！`);
-          await batch.commit();
+          showToast(`已完成：更新 ${updatedCount} 台，略過 ${skippedCount} 台`);
         } catch (err) {
-          handleLocalDataError(err, OperationType.WRITE, 'machines_batch_init');
+          console.error(err);
+          showToast(`一鍵辨識失敗：${getActionableErrorMessage(err)}`, 'error');
+        } finally {
+          setIsBulkRecognizing(false);
         }
       }
     });
@@ -4406,11 +4424,12 @@ const MachineManagement = ({
             </button>
           </div>
           <button 
-            onClick={autoInitializeUnsetMachines}
-            className="px-4 py-2 bg-orange-500 text-white rounded-xl text-sm font-bold flex items-center gap-2 hover:bg-orange-600 transition-colors"
+            onClick={bulkFillBlankRecognitionInfo}
+            disabled={isBulkRecognizing}
+            className="px-4 py-2 bg-orange-500 text-white rounded-xl text-sm font-bold flex items-center gap-2 hover:bg-orange-600 transition-colors disabled:opacity-50"
           >
-            <RefreshCw className="w-4 h-4" />
-            <span className="hidden sm:inline">一鍵初始化未設定</span>
+            <RefreshCw className={cn("w-4 h-4", isBulkRecognizing && "animate-spin")} />
+            <span className="hidden sm:inline">{isBulkRecognizing ? '辨識中' : '一鍵重新辨識空白資訊'}</span>
           </button>
         </div>
       </div>
