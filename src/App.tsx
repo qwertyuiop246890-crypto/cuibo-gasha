@@ -1767,6 +1767,7 @@ ${machines.map(formatMachineForAiPrompt).join('\n')}
     const orderCallTime = fromDateTimeInputValue(callTime, now);
     
     try {
+      const undoSnapshot = await createRestoreSnapshot();
       const batch = writeBatch(db);
       let customerId: string | undefined;
       let existingOrder: Order | undefined;
@@ -1912,7 +1913,7 @@ ${machines.map(formatMachineForAiPrompt).join('\n')}
           ? `${trimmedName} 新增 ${totalAddedQuantity} 顆，NT$${totalAddedAmount}`
           : `建立機台資料：${machineName}`,
         totalAddedQuantity > 0 ? trimmedName : machineName,
-        { machineName, quantity: totalAddedQuantity, amount: totalAddedAmount, mode, callTime: orderCallTime }
+        { undoSnapshot, machineName, quantity: totalAddedQuantity, amount: totalAddedAmount, mode, callTime: orderCallTime }
       );
       showToast(totalAddedQuantity > 0 ? '訂單已更新/建立！' : '機台資料已建立！');
       setCallTime(getCurrentDateTimeInputValue());
@@ -2705,6 +2706,7 @@ const OrdersList = ({
                           const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
                           
                           try {
+                            const undoSnapshot = await createRestoreSnapshot();
                             const batch = writeBatch(db);
                             if (newItems.length === 0) {
                               batch.delete(dbDoc('orders', order.id));
@@ -2723,6 +2725,14 @@ const OrdersList = ({
                             });
                             
                             await batch.commit();
+                            await addOperationLog('order_item_delete', 'order', `已刪除項目：${editingItem.item.machineName}`, order.customerName, {
+                              undoSnapshot,
+                              orderId: order.id,
+                              machineName: editingItem.item.machineName,
+                              variant: editingItem.item.variant,
+                              quantity: editingItem.item.quantity,
+                              amount: editingItem.item.subtotal
+                            });
 
                             showToast('項目已刪除');
                           } catch (err: any) {
@@ -2959,6 +2969,7 @@ const CustomersList = ({
                         type: 'danger',
                         onConfirm: async (checked?: boolean) => {
                           try {
+                            const undoSnapshot = await createRestoreSnapshot();
                             const batch = writeBatch(db);
                             batch.delete(dbDoc('customers', customer.id));
                             
@@ -2971,6 +2982,7 @@ const CustomersList = ({
                             
                             await batch.commit();
                             await addOperationLog('customer_delete', 'customer', `已刪除顧客：${customer.name}`, customer.name, {
+                              undoSnapshot,
                               deleteRelatedOrders: Boolean(checked)
                             });
                             showToast('顧客已刪除');
@@ -3637,6 +3649,7 @@ const MachineEditModal = ({
                           const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
                           
                           try {
+                            const undoSnapshot = await createRestoreSnapshot();
                             const batch = writeBatch(db);
                             if (newItems.length === 0) {
                               batch.delete(dbDoc('orders', order.id));
@@ -3655,6 +3668,14 @@ const MachineEditModal = ({
                             });
                             
                             await batch.commit();
+                            await addOperationLog('order_item_delete', 'order', `已刪除項目：${editingItem.item.machineName}`, order.customerName, {
+                              undoSnapshot,
+                              orderId: order.id,
+                              machineName: editingItem.item.machineName,
+                              variant: editingItem.item.variant,
+                              quantity: editingItem.item.quantity,
+                              amount: editingItem.item.subtotal
+                            });
 
                             showToast('項目已刪除');
                           } catch (err: any) {
@@ -4878,6 +4899,7 @@ const CustomerDetailView = ({
                       type: 'danger',
                       onConfirm: async () => {
                         try {
+                          const undoSnapshot = buildCurrentViewSnapshot();
                           await deleteDoc(dbDoc('orders', order.id));
                           
                           // Update customer stats
@@ -4886,6 +4908,7 @@ const CustomerDetailView = ({
                             totalItems: increment(-order.items.reduce((sum, i) => sum + i.quantity, 0))
                           });
                           await addOperationLog('order_delete', 'order', `已刪除 ${order.customerName} 的訂單`, order.customerName, {
+                            undoSnapshot,
                             orderId: order.id,
                             amount: order.totalAmount,
                             itemCount: order.items.reduce((sum, i) => sum + i.quantity, 0)
@@ -5113,6 +5136,7 @@ const CustomerDetailView = ({
                           const newTotal = newItems.reduce((sum, i) => sum + i.subtotal, 0);
                           
                           try {
+                            const undoSnapshot = buildCurrentViewSnapshot();
                             const batch = writeBatch(db);
                             if (newItems.length === 0) {
                               batch.delete(dbDoc('orders', order.id));
@@ -5131,6 +5155,14 @@ const CustomerDetailView = ({
                             });
                             
                             await batch.commit();
+                            await addOperationLog('order_item_delete', 'order', `已刪除項目：${editingItem.item.machineName}`, order.customerName, {
+                              undoSnapshot,
+                              orderId: order.id,
+                              machineName: editingItem.item.machineName,
+                              variant: editingItem.item.variant,
+                              quantity: editingItem.item.quantity,
+                              amount: editingItem.item.subtotal
+                            });
 
                             showToast('項目已刪除');
                           } catch (err: any) {
@@ -6301,8 +6333,13 @@ const SettingsView = ({
       message: '確定要刪除所有訂單、機台、顧客與釋出資料嗎？系統會先建立本機 JSON 安全備份；若已登入 Google Drive，也會先嘗試建立雲端安全備份。通知範本、價格設定與操作紀錄會保留，可從操作紀錄復原。',
       type: 'danger',
       checkboxLabel: '我確認已理解：刪除前會建立安全備份，但仍要清空目前資料',
-      onConfirm: async () => {
+      onConfirm: async (checked?: boolean) => {
+        if (!checked) {
+          showToast('已取消刪除：需要勾選確認才會清空資料', 'error');
+          return;
+        }
         try {
+          const undoSnapshot = await createRestoreSnapshot();
           await exportData();
           if (googleClientId && driveStatus.connected) {
             await uploadDriveData(false);
@@ -6324,6 +6361,7 @@ const SettingsView = ({
           }
           window.dispatchEvent(new CustomEvent('cuibo-clear-local-data'));
           await addOperationLog('clear_data', 'system', '已刪除全部資料，刪除前已建立安全備份', undefined, {
+            undoSnapshot,
             safetyBackup: true,
             driveBackupAttempted: Boolean(googleClientId && driveStatus.connected)
           });
@@ -6349,6 +6387,40 @@ const SettingsView = ({
     return typeMatched && keywordMatched;
   });
 
+  const operationLogLabelMap: Record<string, string> = {
+    restore: '還原資料',
+    undo: '復原操作',
+    import: '匯入備份',
+    backup: '備份',
+    backup_export: '匯出本機備份',
+    backup_upload: '上傳雲端備份',
+    local_file: '本機檔案',
+    google_drive: 'Google 雲端',
+    operationLog: '操作紀錄',
+    order_create: '新增訂單',
+    order_delete: '刪除訂單',
+    order_item_delete: '刪除訂單項目',
+    order: '訂單',
+    machine_create: '建立機台',
+    machine_update: '修改機台',
+    machine_delete: '刪除機台',
+    machine: '機台',
+    customer_delete: '刪除顧客',
+    customer_alias_update: '修改顧客別名',
+    customer_rename: '顧客改名',
+    customer: '顧客',
+    release_create: '建立釋出',
+    release_cancel: '取消釋出',
+    release_transfer: '釋出成交轉讓',
+    release: '釋出',
+    transfer: '轉讓',
+    exchange: '交換',
+    settings_update: '修改設定',
+    settings: '設定',
+    clear_data: '清空資料',
+    system: '系統'
+  };
+  const getOperationLogLabel = (value?: string) => value ? (operationLogLabelMap[value] || value) : '';
   const operationTypes = Array.from(new Set(operationLogs.flatMap(log => [log.action, log.targetType]).filter(Boolean)));
 
   return (
@@ -6593,7 +6665,7 @@ const SettingsView = ({
           >
             <option value="all">全部操作</option>
             {operationTypes.map(type => (
-              <option key={type} value={type}>{type}</option>
+              <option key={type} value={type}>{getOperationLogLabel(type)}</option>
             ))}
           </select>
         </div>
@@ -6608,8 +6680,8 @@ const SettingsView = ({
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="break-words text-sm font-bold text-ink">{log.message}</p>
-                    <p className="mt-1 text-[10px] font-bold uppercase tracking-wide text-ink/35">
-                      {log.action} / {log.targetType}
+                    <p className="mt-1 text-[10px] font-bold tracking-wide text-ink/35">
+                      {getOperationLogLabel(log.action)} / {getOperationLogLabel(log.targetType)}
                       {log.details?.restorePointExpired ? ' / 還原點已過期' : ''}
                     </p>
                   </div>
@@ -6714,6 +6786,7 @@ export default function App() {
     };
 
     try {
+      const undoSnapshot = await createRestoreSnapshot();
       const batch = writeBatch(db);
       
       if (data.id) {
@@ -6780,6 +6853,7 @@ export default function App() {
 
       await batch.commit();
       await addOperationLog('machine_update', 'machine', `${oldName || data.name} 機台設定已更新`, data.name, {
+        undoSnapshot,
         oldName,
         newName: data.name,
         variants: data.variants,
@@ -6807,6 +6881,7 @@ export default function App() {
       type: 'danger',
       onConfirm: async (checked?: boolean) => {
         try {
+          const undoSnapshot = await createRestoreSnapshot();
           const batch = writeBatch(db);
           batch.delete(dbDoc('machines', machineId));
 
@@ -6848,6 +6923,7 @@ export default function App() {
 
           await batch.commit();
           await addOperationLog('machine_delete', 'machine', `已刪除機台：${machineName}`, machineName, {
+            undoSnapshot,
             deleteRelatedOrders: Boolean(checked)
           });
           showToast('機台已刪除');
@@ -7285,6 +7361,7 @@ export default function App() {
   const applyPreparedImport = async (prepared: PreparedImport) => {
     try {
       setImportInProgress(true);
+      const undoSnapshot = await createRestoreSnapshot();
       let currentBatch = writeBatch(db);
       let operationCount = 0;
 
@@ -7324,7 +7401,10 @@ export default function App() {
         setSettings({ id: 'global', ...prepared.payload.settings });
       }
       setImportPreview(null);
-      await addOperationLog('import', 'backup', `匯入備份：${prepared.fileName}`, prepared.fileName, prepared.counts);
+      await addOperationLog('import', 'backup', `匯入備份：${prepared.fileName}`, prepared.fileName, {
+        undoSnapshot,
+        ...prepared.counts
+      });
       showToast('備份資料已匯入');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
