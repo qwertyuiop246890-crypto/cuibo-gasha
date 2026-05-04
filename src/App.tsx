@@ -1455,19 +1455,6 @@ const Header = ({ user, activeTab }: { user: User, activeTab: string }) => {
           <p className="text-xs text-ink/50 font-medium uppercase tracking-wider">{tabNames[activeTab]}</p>
         </div>
       </div>
-      <div className="flex items-center gap-3">
-        <div className="hidden sm:block text-right">
-          <p className="text-sm font-bold text-ink">{user.displayName}</p>
-          <p className="text-[10px] text-ink/50">{user.email}</p>
-        </div>
-        {user.photoURL ? (
-          <img src={user.photoURL} className="w-10 h-10 rounded-full border-2 border-card-white shadow-sm" alt="User" />
-        ) : (
-          <div className="w-10 h-10 rounded-full border-2 border-card-white shadow-sm bg-primary-blue/10 flex items-center justify-center text-primary-blue font-bold">
-            {user.displayName?.charAt(0) || user.email?.charAt(0) || 'U'}
-          </div>
-        )}
-      </div>
     </header>
   );
 };
