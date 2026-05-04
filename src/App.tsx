@@ -653,6 +653,47 @@ const isBackupStale = (latestLocalAt: string | null, lastBackupAt?: string) => {
   return new Date(latestLocalAt).getTime() > new Date(lastBackupAt).getTime() + 60 * 1000;
 };
 
+const getBackupFreshness = (latestLocalAt: string | null, cloudBackupAt?: string) => {
+  if (!latestLocalAt && !cloudBackupAt) return '目前沒有可比較的資料版本';
+  if (latestLocalAt && !cloudBackupAt) return '本地有資料，雲端尚無備份';
+  if (!latestLocalAt && cloudBackupAt) return '雲端有備份，本地目前沒有資料';
+  const localTime = new Date(latestLocalAt || '').getTime();
+  const cloudTime = new Date(cloudBackupAt || '').getTime();
+  if (!Number.isFinite(localTime) || !Number.isFinite(cloudTime)) return '資料時間無法判斷，請先匯出本地備份';
+  if (localTime > cloudTime + 60 * 1000) return '本地資料比較新，下載雲端前請先上傳或匯出本地備份';
+  if (cloudTime > localTime + 60 * 1000) return '雲端備份比較新，下載後會以匯入預覽等待確認';
+  return '本地與雲端時間接近';
+};
+
+const formatBackupCounts = (counts: BackupCounts | null) => {
+  if (!counts) return '筆數未知';
+  return `顧客 ${counts.customers}、訂單 ${counts.orders}、機台 ${counts.machines}、釋出 ${counts.releases}、圖片 ${counts.images}`;
+};
+
+const getActionableErrorMessage = (error: unknown) => {
+  const raw = error instanceof Error ? error.message : String(error || '');
+  const lower = raw.toLowerCase();
+  if (lower.includes('quota') || lower.includes('storage') || lower.includes('exceeded')) {
+    return '本地儲存空間不足。請先匯出備份，刪除瀏覽器快取中不需要的資料，或改用另一個瀏覽器再匯入。';
+  }
+  if (lower.includes('invalid authentication') || lower.includes('unauthenticated') || lower.includes('401')) {
+    return 'Google 授權已失效。請先登出雲端再重新登入，然後重試備份操作。';
+  }
+  if (lower.includes('popup') || lower.includes('blocked')) {
+    return 'Google 授權視窗被瀏覽器阻擋。請允許此網站開啟彈出視窗後重試。';
+  }
+  if (lower.includes('redirect_uri_mismatch')) {
+    return `Google OAuth 網址設定不一致。請到 Google Cloud 加入 Redirect URI：${getGoogleAuthRedirectUri()}`;
+  }
+  if (lower.includes('cannot read properties') || lower.includes('map')) {
+    return '資料格式有損壞或缺少清單欄位。請改用最近一份正常備份匯入，或先匯出目前資料讓我檢查。';
+  }
+  if (lower.includes('json') || lower.includes('syntax')) {
+    return '備份檔格式不是有效 JSON。請確認選到的是 cuibo_gasha_backup 開頭的備份檔。';
+  }
+  return raw || '發生未知錯誤。請先匯出目前資料，再重新整理頁面後重試。';
+};
+
 const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 const GOOGLE_CLIENT_ID_STORAGE_KEY = 'cuibo_gasha_google_client_id';
 const GOOGLE_DRIVE_REDIRECT_STATE_KEY = 'cuibo_gasha_drive_redirect_state';
@@ -1166,6 +1207,8 @@ const BackupStatusBanner = ({
   latestLocalAt,
   lastBackupAt,
   lastDriveBackupAt,
+  localCounts,
+  latestCloud,
   driveEnabled,
   driveLoading,
   onUpload,
@@ -1174,6 +1217,8 @@ const BackupStatusBanner = ({
   latestLocalAt: string | null;
   lastBackupAt?: string;
   lastDriveBackupAt?: string;
+  localCounts: BackupCounts;
+  latestCloud: DriveBackupFile | null;
   driveEnabled: boolean;
   driveLoading: boolean;
   onUpload: () => void;
@@ -1181,6 +1226,8 @@ const BackupStatusBanner = ({
 }) => {
   const localStale = isBackupStale(latestLocalAt, lastBackupAt);
   const driveStale = isBackupStale(latestLocalAt, lastDriveBackupAt);
+  const cloudCounts = parseCounts(latestCloud);
+  const cloudAt = latestCloud?.createdTime || lastDriveBackupAt;
   if (!latestLocalAt || (!localStale && !driveStale)) return null;
 
   return (
@@ -1192,6 +1239,19 @@ const BackupStatusBanner = ({
             <p className="text-sm font-bold">目前有尚未備份的本地資料</p>
             <p className="mt-1 text-xs font-medium text-amber-800/75">
               最新資料：{formatDateTime(latestLocalAt)}。本機備份：{lastBackupAt ? formatDateTime(lastBackupAt) : '尚無'}；雲端備份：{lastDriveBackupAt ? formatDateTime(lastDriveBackupAt) : '尚無'}。
+            </p>
+            <div className="mt-3 grid gap-2 text-[11px] font-bold sm:grid-cols-2">
+              <div className="rounded-xl bg-white/70 p-3">
+                <p className="text-amber-900/50">本地資料</p>
+                <p className="mt-1">{formatBackupCounts(localCounts)}</p>
+              </div>
+              <div className="rounded-xl bg-white/70 p-3">
+                <p className="text-amber-900/50">雲端資料</p>
+                <p className="mt-1">{cloudAt ? `${formatDateTime(cloudAt)}；${formatBackupCounts(cloudCounts)}` : '尚未讀取到雲端備份'}</p>
+              </div>
+            </div>
+            <p className="mt-2 text-xs font-bold text-amber-900">
+              {getBackupFreshness(latestLocalAt, cloudAt)}
             </p>
           </div>
         </div>
@@ -1242,8 +1302,34 @@ const CreateOrder = ({
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
   const [aiVariantDetails, setAiVariantDetails] = useState<Record<string, MachineVariantDetail>>({});
+  const [aiCandidate, setAiCandidate] = useState<{
+    source: 'exact-image' | 'similar-image' | 'ai';
+    machineName: string;
+    price: number;
+    variants: string[];
+    variantDetails: Record<string, MachineVariantDetail>;
+    existingMachine?: any;
+    similarity?: number;
+    factCheckNotes?: string;
+    sources?: string[];
+  } | null>(null);
   const [isFullscreenImage, setIsFullscreenImage] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const applyAiCandidate = (candidate = aiCandidate) => {
+    if (!candidate) return;
+    setMachineName(candidate.existingMachine?.name || candidate.machineName);
+    setPrice(candidate.existingMachine?.defaultPrice || candidate.price || price);
+    setAiVariantDetails(candidate.variantDetails);
+    setOrderItems((candidate.variants.length > 0 ? candidate.variants : ['']).map((variant) => ({
+      id: crypto.randomUUID(),
+      variant,
+      quantity: 1,
+      isEco: false
+    })));
+    setAiCandidate(null);
+    showToast(candidate.existingMachine ? `已套用既有機台「${candidate.existingMachine.name}」` : '已套用 AI 建議，請確認後新增');
+  };
 
   const processImage = async (file: File) => {
     setIsAnalyzing(true);
@@ -1331,23 +1417,25 @@ const CreateOrder = ({
       };
 
       const compressedDataUrl = await compressImage(file);
-      const loadExistingMachine = (machine: any, message: string) => {
-        setMachineName(machine.name);
-        setPrice(machine.defaultPrice);
-        setAiVariantDetails(normalizeVariantDetails(machine.variants || [], machine.variantDetails));
-        if (machine.variants && machine.variants.length > 0) {
-          setOrderItems(machine.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
-        } else {
-          setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
-        }
+      const suggestExistingMachine = (machine: any, source: 'exact-image' | 'similar-image', message: string, similarity?: number) => {
         setUploadedImage(compressedDataUrl);
+        setAiCandidate({
+          source,
+          machineName: machine.name,
+          price: machine.defaultPrice,
+          variants: machine.variants || [],
+          variantDetails: normalizeVariantDetails(machine.variants || [], machine.variantDetails),
+          existingMachine: machine,
+          similarity,
+          factCheckNotes: message
+        });
         showToast(message, 'success');
       };
       
       // 檢查是否已經上傳過相同的圖片 (精確匹配)
       const existingMachineByImg = machines.find(m => m.imageUrl === compressedDataUrl);
       if (existingMachineByImg) {
-        loadExistingMachine(existingMachineByImg, `已找到相同圖片：使用既有機台「${existingMachineByImg.name}」與已建立款式`);
+        suggestExistingMachine(existingMachineByImg, 'exact-image', `已找到相同圖片：請確認是否套用既有機台「${existingMachineByImg.name}」`);
         setIsAnalyzing(false);
         return;
       }
@@ -1378,7 +1466,7 @@ const CreateOrder = ({
 
         if (bestMatch && lowestDist <= 6) {
           const similarity = Math.round((1 - lowestDist / 64) * 100);
-          loadExistingMachine(bestMatch, `圖片相似度 ${similarity}%：已使用既有機台「${bestMatch.name}」與已建立款式`);
+          suggestExistingMachine(bestMatch, 'similar-image', `圖片相似度 ${similarity}%：請確認是否套用既有機台「${bestMatch.name}」`, similarity);
           setIsAnalyzing(false);
           return;
         }
@@ -1558,43 +1646,38 @@ ${machines.map(formatMachineForAiPrompt).join('\n')}
         });
         
         if (existingMachineByName) {
-          setMachineName(existingMachineByName.name);
-          setPrice(existingMachineByName.defaultPrice);
-          setAiVariantDetails({
+          const mergedDetails = {
             ...normalizeVariantDetails(existingMachineByName.variants || [], existingMachineByName.variantDetails),
             ...detectedVariantDetails
+          };
+          setAiCandidate({
+            source: 'ai',
+            machineName: existingMachineByName.name,
+            price: existingMachineByName.defaultPrice,
+            variants: existingMachineByName.variants && existingMachineByName.variants.length > 0 ? existingMachineByName.variants : aiVariants,
+            variantDetails: mergedDetails,
+            existingMachine: existingMachineByName,
+            factCheckNotes: result.factCheckNotes,
+            sources: Array.isArray(result.sources) ? result.sources : []
           });
-          if (existingMachineByName.variants && existingMachineByName.variants.length > 0) {
-            setOrderItems(existingMachineByName.variants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
-          } else {
-            setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
-          }
-          showToast(`AI 辨識為已有機台「${existingMachineByName.name}」，已載入既有款式`, 'success');
+          showToast(`AI 找到疑似既有機台「${existingMachineByName.name}」，請確認後套用`, 'success');
         } else {
-          if (aiMachineName) setMachineName(aiMachineName);
-          setAiVariantDetails(detectedVariantDetails);
-          if (aiVariants.length > 0) {
-            setOrderItems(aiVariants.map((v: string) => ({ id: crypto.randomUUID(), variant: v, quantity: 1, isEco: false })));
-          } else if (result.variant) {
-            setOrderItems([{ id: crypto.randomUUID(), variant: result.variant, quantity: 1, isEco: false }]);
-          } else {
-            setOrderItems([{ id: crypto.randomUUID(), variant: '', quantity: 1, isEco: false }]);
-          }
-          if (result.price) {
-            const map = settings?.priceMap || DEFAULT_PRICE_MAP;
-            if (map[result.price]) {
-               setPrice(result.price);
-            } else {
-               setPrice(result.price);
-            }
-          }
-          showToast('圖片分析完成！', 'success');
+          setAiCandidate({
+            source: 'ai',
+            machineName: aiMachineName,
+            price: Number(result.price) || price,
+            variants: aiVariants,
+            variantDetails: detectedVariantDetails,
+            factCheckNotes: result.factCheckNotes,
+            sources: Array.isArray(result.sources) ? result.sources : []
+          });
+          showToast('圖片分析完成，請確認候選結果後套用', 'success');
         }
       }
       setIsAnalyzing(false);
     } catch (err) {
       console.error(err);
-      showToast('圖片分析失敗，請稍後再試', 'error');
+      showToast(`圖片分析失敗：${getActionableErrorMessage(err)}`, 'error');
       setIsAnalyzing(false);
     }
   };
@@ -1857,12 +1940,7 @@ ${machines.map(formatMachineForAiPrompt).join('\n')}
       }
     } catch (err: any) {
       console.error(err);
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.includes('Missing or insufficient')) {
-        showToast('無法連線：資料驗證或權限不足，請檢查資料格式！', 'error');
-      } else {
-        showToast(`新增失敗：${message || '請稍後再試'}`, 'error');
-      }
+      showToast(`新增失敗：${getActionableErrorMessage(err)}`, 'error');
     }
   };
 
@@ -1871,6 +1949,26 @@ ${machines.map(formatMachineForAiPrompt).join('\n')}
     ...machines.map(m => m.name),
     ...orders.flatMap(o => o.items.map(i => i.machineName))
   ]));
+  const latestOrder = [...orders].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+  const latestMachineName = latestOrder?.items?.[latestOrder.items.length - 1]?.machineName || '';
+  const quickMachines = Array.from(
+    orders.flatMap(order => order.items).reduce((map, item) => {
+      map.set(item.machineName, (map.get(item.machineName) || 0) + item.quantity);
+      return map;
+    }, new Map<string, number>())
+  )
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([name]) => name);
+  const adjustCallTimeMinutes = (minutes: number) => {
+    const base = callTime ? new Date(callTime) : new Date();
+    if (Number.isNaN(base.getTime())) {
+      setCallTime(getCurrentDateTimeInputValue());
+      return;
+    }
+    base.setMinutes(base.getMinutes() + minutes);
+    setCallTime(toDateTimeInputValue(base.toISOString()));
+  };
   
   const selectedMachine = machines.find(m => m.name === machineName);
   const variantSuggestions = selectedMachine 
@@ -1895,6 +1993,22 @@ ${machines.map(formatMachineForAiPrompt).join('\n')}
           placeholder="輸入或選擇顧客名稱..."
           suggestions={customerSuggestions}
         />
+        <div className="mt-3 flex flex-wrap gap-2">
+          {latestOrder?.customerName && (
+            <button
+              onClick={() => setCustomerName(latestOrder.customerName)}
+              className="rounded-xl bg-background px-3 py-2 text-xs font-bold text-ink/60"
+            >
+              上一位：{latestOrder.customerName}
+            </button>
+          )}
+          <button
+            onClick={() => setCustomerName('')}
+            className="rounded-xl bg-background px-3 py-2 text-xs font-bold text-ink/40"
+          >
+            清空顧客
+          </button>
+        </div>
         <div className="mt-4">
           <label className="text-xs font-bold text-ink/40 block mb-2">喊單時間</label>
           <input
@@ -1903,6 +2017,12 @@ ${machines.map(formatMachineForAiPrompt).join('\n')}
             onChange={(e) => setCallTime(e.target.value)}
             className="w-full px-4 py-3 bg-background rounded-xl border-none text-ink outline-none focus:ring-2 focus:ring-primary-blue"
           />
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button onClick={() => setCallTime(getCurrentDateTimeInputValue())} className="rounded-lg bg-background px-3 py-1.5 text-[10px] font-bold text-ink/50">現在</button>
+            <button onClick={() => adjustCallTimeMinutes(1)} className="rounded-lg bg-background px-3 py-1.5 text-[10px] font-bold text-ink/50">+1 分</button>
+            <button onClick={() => adjustCallTimeMinutes(5)} className="rounded-lg bg-background px-3 py-1.5 text-[10px] font-bold text-ink/50">+5 分</button>
+            <button onClick={() => adjustCallTimeMinutes(-1)} className="rounded-lg bg-background px-3 py-1.5 text-[10px] font-bold text-ink/50">-1 分</button>
+          </div>
           <p className="text-[10px] text-ink/30 mt-2">預設當下時間；新增成功後會自動更新為新的當下時間。</p>
         </div>
       </div>
@@ -1950,11 +2070,79 @@ ${machines.map(formatMachineForAiPrompt).join('\n')}
                 e.stopPropagation();
                 setUploadedImage(null);
                 setAiVariantDetails({});
+                setAiCandidate(null);
               }}
               className="absolute top-2 right-2 p-2 bg-white/80 hover:bg-white rounded-full shadow-sm text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
             >
               <Trash2 className="w-4 h-4" />
             </button>
+          </div>
+        )}
+
+        {aiCandidate && (
+          <div className="mb-6 rounded-3xl border border-primary-blue/20 bg-primary-blue/5 p-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <p className="text-xs font-bold text-primary-blue">AI 候選確認</p>
+                <h4 className="mt-1 break-words text-lg font-bold text-ink">
+                  {aiCandidate.existingMachine ? `疑似既有機台：${aiCandidate.existingMachine.name}` : aiCandidate.machineName || '未命名機台'}
+                </h4>
+                <p className="mt-1 text-xs font-medium text-ink/50">
+                  {aiCandidate.similarity ? `圖片相似度 ${aiCandidate.similarity}%；` : ''}
+                  價格 ¥{aiCandidate.price || price}；款式 {aiCandidate.variants.length} 筆。套用後才會進入目前表單，儲存前仍可修改。
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setAiCandidate(null)}
+                  className="rounded-xl bg-card-white px-4 py-2 text-xs font-bold text-ink/60"
+                >
+                  不採用
+                </button>
+                <button
+                  onClick={() => applyAiCandidate()}
+                  className="rounded-xl bg-primary-blue px-4 py-2 text-xs font-bold text-white"
+                >
+                  套用候選
+                </button>
+              </div>
+            </div>
+            {aiCandidate.existingMachine?.imageUrl && (
+              <div className="mt-3 overflow-hidden rounded-2xl bg-card-white">
+                <img src={aiCandidate.existingMachine.imageUrl || undefined} alt="既有機台圖片" className="h-40 w-full object-contain" referrerPolicy="no-referrer" />
+              </div>
+            )}
+            <div className="mt-3 grid gap-2">
+              {aiCandidate.variants.map(variant => {
+                const detail = aiCandidate.variantDetails[variant];
+                return (
+                  <div key={variant} className="rounded-2xl bg-card-white p-3 text-xs">
+                    <p className="font-bold text-ink">{variant}</p>
+                    <p className="mt-1 text-ink/50">
+                      {[
+                        detail?.originalName ? `原文：${detail.originalName}` : '',
+                        detail?.feature ? `特徵：${detail.feature}` : '',
+                        detail?.aliases?.length ? `別名：${detail.aliases.join('、')}` : ''
+                      ].filter(Boolean).join(' / ') || '尚無結構化補充'}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+            {aiCandidate.factCheckNotes && (
+              <p className="mt-3 rounded-2xl bg-card-white p-3 text-xs font-medium leading-relaxed text-ink/55">
+                {aiCandidate.factCheckNotes}
+              </p>
+            )}
+            {aiCandidate.sources && aiCandidate.sources.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {aiCandidate.sources.map(source => (
+                  <a key={source} href={source} target="_blank" rel="noreferrer" className="rounded-lg bg-card-white px-2 py-1 text-[10px] font-bold text-primary-blue">
+                    來源
+                  </a>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -1971,6 +2159,25 @@ ${machines.map(formatMachineForAiPrompt).join('\n')}
             placeholder="輸入機台名稱 (例: 吉伊卡哇)"
             suggestions={machineSuggestions}
           />
+          <div className="flex flex-wrap gap-2">
+            {latestMachineName && (
+              <button
+                onClick={() => setMachineName(latestMachineName)}
+                className="rounded-xl bg-background px-3 py-2 text-xs font-bold text-ink/60"
+              >
+                上一台：{latestMachineName}
+              </button>
+            )}
+            {quickMachines.map(name => (
+              <button
+                key={name}
+                onClick={() => setMachineName(name)}
+                className="rounded-xl bg-primary-blue/10 px-3 py-2 text-xs font-bold text-primary-blue"
+              >
+                {name}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="space-y-4 mb-6">
@@ -2762,8 +2969,11 @@ const CustomersList = ({
                               });
                             }
                             
-                            showToast('顧客已刪除');
                             await batch.commit();
+                            await addOperationLog('customer_delete', 'customer', `已刪除顧客：${customer.name}`, customer.name, {
+                              deleteRelatedOrders: Boolean(checked)
+                            });
+                            showToast('顧客已刪除');
                           } catch (err) {
                             handleLocalDataError(err, OperationType.DELETE, `customers/${customer.id}`);
                           }
@@ -3519,7 +3729,11 @@ const MachineManagement = ({
       show: true,
       title: '一鍵初始化未設定機台',
       message: `將自動為 ${unsetMachines.length} 個未設定的機台建立預設資料（自動抓取訂單中的款式與金額）。確定要執行嗎？`,
-      onConfirm: async () => {
+      onConfirm: async (checked?: boolean) => {
+        if (!checked) {
+          showToast('已取消刪除：需要勾選確認才會清空資料', 'error');
+          return;
+        }
         try {
           const batch = writeBatch(db);
           const now = new Date().toISOString();
@@ -4664,7 +4878,6 @@ const CustomerDetailView = ({
                       type: 'danger',
                       onConfirm: async () => {
                         try {
-                          showToast('訂單已刪除');
                           await deleteDoc(dbDoc('orders', order.id));
                           
                           // Update customer stats
@@ -4672,6 +4885,12 @@ const CustomerDetailView = ({
                             totalSpent: increment(-order.totalAmount),
                             totalItems: increment(-order.items.reduce((sum, i) => sum + i.quantity, 0))
                           });
+                          await addOperationLog('order_delete', 'order', `已刪除 ${order.customerName} 的訂單`, order.customerName, {
+                            orderId: order.id,
+                            amount: order.totalAmount,
+                            itemCount: order.items.reduce((sum, i) => sum + i.quantity, 0)
+                          });
+                          showToast('訂單已刪除');
                         } catch (err) {
                           handleLocalDataError(err, OperationType.DELETE, `orders/${order.id}`);
                         }
@@ -5112,16 +5331,21 @@ type PrintPage = {
 };
 
 type PrintSortMode = 'quantity' | 'name' | 'amount';
+type PrintDensityMode = 'compact' | 'normal' | 'large';
 
-const PRINT_PAGE_CAPACITY = 35;
 const PRINT_HEADER_UNITS = 4.6;
 const PRINT_FOOTER_UNITS = 2.2;
 const PRINT_BLOCK_GAP_UNITS = 0.8;
+const PRINT_DENSITY_CONFIG: Record<PrintDensityMode, { label: string; capacity: number; scale: number; rowClass: string; textClass: string }> = {
+  compact: { label: '緊湊', capacity: 43, scale: 0.82, rowClass: 'print-density-compact', textClass: 'text-xs' },
+  normal: { label: '一般', capacity: 35, scale: 1, rowClass: 'print-density-normal', textClass: 'text-sm' },
+  large: { label: '大字', capacity: 27, scale: 1.18, rowClass: 'print-density-large', textClass: 'text-base' }
+};
 
-const estimatePrintItemUnits = (item: OrderItem) => {
+const estimatePrintItemUnits = (item: OrderItem, densityMode: PrintDensityMode) => {
   const machineLines = Math.ceil((item.machineName || '').length / 12);
   const variantLines = Math.ceil((item.variant || '').length / 13);
-  return Math.max(1.35, Math.max(machineLines, variantLines) * 0.95 + 0.45);
+  return Math.max(1.35, Math.max(machineLines, variantLines) * 0.95 + 0.45) * PRINT_DENSITY_CONFIG[densityMode].scale;
 };
 
 const sortPrintItems = (items: OrderItem[]) => {
@@ -5154,14 +5378,14 @@ const sortPrintCustomers = (selectedCustomers: Customer[], orders: Order[], sort
   });
 };
 
-const buildPrintPages = (selectedCustomers: Customer[], orders: Order[], sortMode: PrintSortMode): PrintPage[] => {
+const buildPrintPages = (selectedCustomers: Customer[], orders: Order[], sortMode: PrintSortMode, densityMode: PrintDensityMode): PrintPage[] => {
   const pages: PrintPage[] = [{ blocks: [] }];
-  let remaining = PRINT_PAGE_CAPACITY;
+  let remaining = PRINT_DENSITY_CONFIG[densityMode].capacity;
 
   const currentPage = () => pages[pages.length - 1];
   const newPage = () => {
     pages.push({ blocks: [] });
-    remaining = PRINT_PAGE_CAPACITY;
+    remaining = PRINT_DENSITY_CONFIG[densityMode].capacity;
   };
 
   sortPrintCustomers(selectedCustomers, orders, sortMode).forEach((customer) => {
@@ -5181,14 +5405,14 @@ const buildPrintPages = (selectedCustomers: Customer[], orders: Order[], sortMod
     let isFirstSegment = true;
 
     while (index < allItems.length) {
-      const firstItemUnits = estimatePrintItemUnits(allItems[index]);
+      const firstItemUnits = estimatePrintItemUnits(allItems[index], densityMode);
       if (remaining < PRINT_HEADER_UNITS + firstItemUnits + PRINT_BLOCK_GAP_UNITS) {
         newPage();
       }
 
       const availableUnits = Math.max(firstItemUnits, remaining - PRINT_HEADER_UNITS - PRINT_BLOCK_GAP_UNITS);
       const availableUnitsIfLast = Math.max(firstItemUnits, availableUnits - PRINT_FOOTER_UNITS);
-      const remainingUnits = allItems.slice(index).reduce((sum, item) => sum + estimatePrintItemUnits(item), 0);
+      const remainingUnits = allItems.slice(index).reduce((sum, item) => sum + estimatePrintItemUnits(item, densityMode), 0);
       const shouldFinishHere = remainingUnits <= availableUnitsIfLast;
       const rowBudget = shouldFinishHere ? availableUnitsIfLast : availableUnits;
       const pageItems: OrderItem[] = [];
@@ -5196,7 +5420,7 @@ const buildPrintPages = (selectedCustomers: Customer[], orders: Order[], sortMod
 
       while (index + pageItems.length < allItems.length) {
         const item = allItems[index + pageItems.length];
-        const itemUnits = estimatePrintItemUnits(item);
+        const itemUnits = estimatePrintItemUnits(item, densityMode);
         if (pageItems.length > 0 && usedItemUnits + itemUnits > rowBudget) break;
         pageItems.push(item);
         usedItemUnits += itemUnits;
@@ -5221,14 +5445,14 @@ const buildPrintPages = (selectedCustomers: Customer[], orders: Order[], sortMod
   return pages.filter(page => page.blocks.length > 0);
 };
 
-const PrintCustomerTable = ({ block }: { block: PrintCustomerBlock }) => (
-  <section className="print-customer-block">
-    <table className="w-full text-left text-sm">
+const PrintCustomerTable = ({ block, densityMode }: { block: PrintCustomerBlock; densityMode: PrintDensityMode }) => (
+  <section className={cn("print-customer-block", PRINT_DENSITY_CONFIG[densityMode].rowClass)}>
+    <table className={cn("w-full text-left", PRINT_DENSITY_CONFIG[densityMode].textClass)}>
       <thead>
         <tr>
           <th colSpan={6} className="pb-2">
             <div className="border-b-2 border-ink pb-2 text-center">
-              <h1 className="text-xl font-bold text-ink">
+              <h1 className={cn("font-bold text-ink", densityMode === 'compact' ? 'text-lg' : densityMode === 'large' ? 'text-2xl' : 'text-xl')}>
                 {block.customer.name}{block.isContinuation ? '（續）' : ''} 訂單明細
               </h1>
               <div className="mt-1 flex items-center justify-between text-[10px] font-bold text-ink/60">
@@ -5254,7 +5478,7 @@ const PrintCustomerTable = ({ block }: { block: PrintCustomerBlock }) => (
           </tr>
         ) : (
           block.items.map((item, idx) => (
-            <tr key={item.id || idx} className="border-b border-divider print:border-ink/10">
+            <tr key={item.id || idx} className="print-row border-b border-divider print:border-ink/10">
               <td className="px-2 py-1 text-center align-middle">
                 <div className="mx-auto h-4 w-4 rounded-sm border-2 border-ink/40 print:border-black"></div>
               </td>
@@ -5293,6 +5517,7 @@ const PrintPreview = ({
 }) => {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [sortMode, setSortMode] = useState<PrintSortMode>('quantity');
+  const [densityMode, setDensityMode] = useState<PrintDensityMode>('compact');
   const printRef = useRef<HTMLDivElement>(null);
   const handlePrint = useReactToPrint({ contentRef: printRef });
 
@@ -5307,16 +5532,34 @@ const PrintPreview = ({
   };
 
   const selectedCustomers = customers.filter(c => selectedIds.includes(c.id));
-  const printPages = buildPrintPages(selectedCustomers, orders, sortMode);
+  const printPages = buildPrintPages(selectedCustomers, orders, sortMode, densityMode);
+  const selectedItemCount = selectedCustomers.reduce((sum, customer) => (
+    sum + orders
+      .filter(order => order.customerId === customer.id)
+      .reduce((orderSum, order) => orderSum + order.items.reduce((itemSum, item) => itemSum + item.quantity, 0), 0)
+  ), 0);
 
   return (
     <div className="space-y-6 pb-24">
       <div className="flex items-center justify-between bg-card-white p-4 rounded-2xl card-shadow">
         <div>
           <h2 className="text-xl font-bold text-ink">列印預覽</h2>
-          <p className="text-xs font-medium text-ink/40">已啟用預覽，確認版面後再列印。</p>
+          <p className="text-xs font-medium text-ink/40">
+            預估 {printPages.length} 頁，{selectedCustomers.length} 位顧客，{selectedItemCount} 顆。模式：{PRINT_DENSITY_CONFIG[densityMode].label}
+          </p>
         </div>
         <div className="flex items-center gap-2">
+          <div className="hidden sm:flex rounded-xl bg-background p-1">
+            {(['compact', 'normal', 'large'] as PrintDensityMode[]).map(mode => (
+              <button
+                key={mode}
+                onClick={() => setDensityMode(mode)}
+                className={cn('px-3 py-2 rounded-lg text-xs font-bold', densityMode === mode ? 'bg-card-white text-ink shadow-sm' : 'text-ink/40')}
+              >
+                {PRINT_DENSITY_CONFIG[mode].label}
+              </button>
+            ))}
+          </div>
           <div className="hidden sm:flex rounded-xl bg-background p-1">
             <button
               onClick={() => setSortMode('quantity')}
@@ -5349,6 +5592,17 @@ const PrintPreview = ({
 
       <div className="flex flex-col lg:flex-row gap-6">
         <div className="w-full lg:w-1/3 space-y-2">
+          <div className="flex sm:hidden rounded-xl bg-card-white p-1 card-shadow">
+            {(['compact', 'normal', 'large'] as PrintDensityMode[]).map(mode => (
+              <button
+                key={mode}
+                onClick={() => setDensityMode(mode)}
+                className={cn('flex-1 px-3 py-2 rounded-lg text-xs font-bold', densityMode === mode ? 'bg-background text-ink' : 'text-ink/40')}
+              >
+                {PRINT_DENSITY_CONFIG[mode].label}
+              </button>
+            ))}
+          </div>
           <div className="flex sm:hidden rounded-xl bg-card-white p-1 card-shadow">
             <button
               onClick={() => setSortMode('quantity')}
@@ -5440,6 +5694,25 @@ const PrintPreview = ({
                   padding-top: 1.1mm !important;
                   padding-bottom: 1.1mm !important;
                 }
+                .print-density-compact th,
+                .print-density-compact td {
+                  padding-top: 0.7mm !important;
+                  padding-bottom: 0.7mm !important;
+                  font-size: 10px !important;
+                  line-height: 1.12 !important;
+                }
+                .print-density-normal th,
+                .print-density-normal td {
+                  font-size: 12px !important;
+                  line-height: 1.2 !important;
+                }
+                .print-density-large th,
+                .print-density-large td {
+                  padding-top: 1.8mm !important;
+                  padding-bottom: 1.8mm !important;
+                  font-size: 14px !important;
+                  line-height: 1.28 !important;
+                }
               }
             `}</style>
             {printPages.length === 0 ? (
@@ -5452,7 +5725,7 @@ const PrintPreview = ({
                   <div className="print-page-inner space-y-3">
                     {page.blocks.map((block, blockIndex) => (
                       <React.Fragment key={`${block.customer.id}-${pageIndex}-${blockIndex}`}>
-                        <PrintCustomerTable block={block} />
+                        <PrintCustomerTable block={block} densityMode={densityMode} />
                       </React.Fragment>
                     ))}
                   </div>
@@ -5942,7 +6215,6 @@ const SettingsView = ({
   operationLogs,
   restoreFromLog,
   googleClientId,
-  saveGoogleClientId,
   connectGoogleDrive,
   logoutGoogleDrive,
   uploadDriveData,
@@ -5962,10 +6234,9 @@ const SettingsView = ({
   operationLogs: OperationLog[],
   restoreFromLog: (log: OperationLog, mode?: 'restore' | 'undo') => void,
   googleClientId: string,
-  saveGoogleClientId: (clientId: string) => void,
   connectGoogleDrive: () => void,
   logoutGoogleDrive: () => void,
-  uploadDriveData: (force?: boolean) => void,
+  uploadDriveData: (force?: boolean) => Promise<void>,
   downloadDriveData: () => void,
   refreshDriveBackups: () => void
 }) => {
@@ -5973,7 +6244,8 @@ const SettingsView = ({
   const [priceMap, setPriceMap] = useState<Record<number, any>>(settings?.priceMap || DEFAULT_PRICE_MAP);
   const [newJpy, setNewJpy] = useState('');
   const [newTwd, setNewTwd] = useState('');
-  const [googleClientIdInput, setGoogleClientIdInput] = useState(googleClientId);
+  const [operationLogQuery, setOperationLogQuery] = useState('');
+  const [operationLogType, setOperationLogType] = useState('all');
 
   useEffect(() => {
     if (settings) {
@@ -5981,10 +6253,6 @@ const SettingsView = ({
       setPriceMap(settings.priceMap || DEFAULT_PRICE_MAP);
     }
   }, [settings]);
-
-  useEffect(() => {
-    setGoogleClientIdInput(googleClientId);
-  }, [googleClientId]);
 
   useEffect(() => {
     if (googleClientId) {
@@ -6030,11 +6298,15 @@ const SettingsView = ({
     setConfirmModal({
       show: true,
       title: '刪除全部資料',
-      message: '確定要刪除所有訂單、機台、顧客與釋出資料嗎？系統會先下載一份本機 JSON 備份，通知範本、價格設定與操作紀錄會保留。',
+      message: '確定要刪除所有訂單、機台、顧客與釋出資料嗎？系統會先建立本機 JSON 安全備份；若已登入 Google Drive，也會先嘗試建立雲端安全備份。通知範本、價格設定與操作紀錄會保留，可從操作紀錄復原。',
       type: 'danger',
+      checkboxLabel: '我確認已理解：刪除前會建立安全備份，但仍要清空目前資料',
       onConfirm: async () => {
         try {
           await exportData();
+          if (googleClientId && driveStatus.connected) {
+            await uploadDriveData(false);
+          }
           const collections = ['orders', 'machines', 'customers', 'releases'];
           for (const colName of collections) {
             const snapshot = await getDocs(col(colName));
@@ -6051,19 +6323,33 @@ const SettingsView = ({
             }
           }
           window.dispatchEvent(new CustomEvent('cuibo-clear-local-data'));
-          await addOperationLog('clear_data', 'system', '已刪除全部資料，通知範本與操作紀錄已保留');
-          showToast('全部資料已清除，通知範本已保留');
+          await addOperationLog('clear_data', 'system', '已刪除全部資料，刪除前已建立安全備份', undefined, {
+            safetyBackup: true,
+            driveBackupAttempted: Boolean(googleClientId && driveStatus.connected)
+          });
+          showToast('全部資料已清除，刪除前已建立安全備份');
         } catch (err: any) {
-          if (err?.message?.toLowerCase().includes('quota') || String(err).toLowerCase().includes('quota')) {
-            showToast('清除失敗：資料庫免費額度已滿', 'error');
-          } else {
-            showToast('清除失敗', 'error');
-          }
+          showToast(`清除失敗：${getActionableErrorMessage(err)}`, 'error');
           handleLocalDataError(err, OperationType.DELETE, 'multiple_collections');
         }
       }
     });
   };
+
+  const filteredOperationLogs = operationLogs.filter(log => {
+    const typeMatched = operationLogType === 'all' || log.action === operationLogType || log.targetType === operationLogType;
+    const keyword = operationLogQuery.trim().toLowerCase();
+    const keywordMatched = !keyword || [
+      log.message,
+      log.action,
+      log.targetType,
+      log.targetName,
+      JSON.stringify(log.details || {})
+    ].some(value => String(value || '').toLowerCase().includes(keyword));
+    return typeMatched && keywordMatched;
+  });
+
+  const operationTypes = Array.from(new Set(operationLogs.flatMap(log => [log.action, log.targetType]).filter(Boolean)));
 
   return (
     <div className="space-y-6 pb-20">
@@ -6228,45 +6514,6 @@ const SettingsView = ({
           </button>
         </div>
 
-        <div className="mb-4 rounded-2xl bg-background p-4">
-          <label className="mb-2 block text-xs font-bold text-ink/40">Google OAuth Client ID</label>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <input
-              type="text"
-              value={googleClientIdInput}
-              onChange={(e) => setGoogleClientIdInput(e.target.value)}
-              placeholder="xxxxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com"
-              className="min-w-0 flex-1 rounded-xl border-none bg-card-white px-4 py-3 text-sm font-medium text-ink outline-none focus:ring-2 focus:ring-primary-blue"
-            />
-            <button
-              onClick={() => saveGoogleClientId(googleClientIdInput)}
-              className="rounded-xl bg-ink px-4 py-3 text-sm font-bold text-white"
-            >
-              儲存
-            </button>
-          </div>
-          <p className="mt-2 text-[10px] font-medium leading-relaxed text-ink/35">
-            Client ID 不是密碼，可存在前端；Google Cloud 的 Authorized JavaScript origins 與 Authorized redirect URIs 仍需加入目前網址。
-          </p>
-          <div className="mt-3 grid gap-2">
-            <div className="rounded-xl bg-card-white p-3">
-              <p className="text-[10px] font-bold text-ink/35">Authorized JavaScript origins</p>
-              <code className="mt-1 block break-all text-xs font-bold text-ink">{getGoogleAuthOrigin()}</code>
-            </div>
-            <div className="rounded-xl bg-card-white p-3">
-              <p className="text-[10px] font-bold text-ink/35">Authorized redirect URIs</p>
-              <code className="mt-1 block break-all text-xs font-bold text-ink">{getGoogleAuthRedirectUri()}</code>
-            </div>
-          </div>
-        </div>
-
-        {!googleClientId && (
-          <div className="mb-4 rounded-2xl bg-amber-50 p-4 text-xs font-medium leading-relaxed text-amber-800">
-            尚未設定 Google OAuth Client ID。請在 Vercel 環境變數加入 <code className="font-bold">VITE_GOOGLE_CLIENT_ID</code>，
-            並把目前網址加入 Google Cloud OAuth 的 Authorized JavaScript origins。
-          </div>
-        )}
-
         <div className="grid grid-cols-2 gap-3">
           <button
             onClick={connectGoogleDrive}
@@ -6325,13 +6572,38 @@ const SettingsView = ({
       <div className="bg-card-white p-6 rounded-3xl card-shadow">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-sm font-bold text-ink/40 uppercase tracking-widest">操作紀錄</h3>
-          <span className="rounded-lg bg-background px-2 py-1 text-[10px] font-bold text-ink/40">最近 {Math.min(operationLogs.length, 20)} 筆</span>
+          <span className="rounded-lg bg-background px-2 py-1 text-[10px] font-bold text-ink/40">
+            顯示 {Math.min(filteredOperationLogs.length, 50)} / {operationLogs.length} 筆
+          </span>
+        </div>
+        <div className="mb-4 grid gap-2 sm:grid-cols-[1fr_auto]">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink/30" />
+            <input
+              value={operationLogQuery}
+              onChange={(e) => setOperationLogQuery(e.target.value)}
+              placeholder="搜尋顧客、機台、款式、操作內容..."
+              className="w-full rounded-2xl border-none bg-background py-3 pl-10 pr-4 text-sm font-medium outline-none focus:ring-2 focus:ring-primary-blue"
+            />
+          </div>
+          <select
+            value={operationLogType}
+            onChange={(e) => setOperationLogType(e.target.value)}
+            className="rounded-2xl border-none bg-background px-4 py-3 text-sm font-bold text-ink outline-none focus:ring-2 focus:ring-primary-blue"
+          >
+            <option value="all">全部操作</option>
+            {operationTypes.map(type => (
+              <option key={type} value={type}>{type}</option>
+            ))}
+          </select>
         </div>
         <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
           {operationLogs.length === 0 ? (
             <p className="rounded-2xl bg-background p-4 text-center text-sm font-medium text-ink/30">目前沒有操作紀錄</p>
+          ) : filteredOperationLogs.length === 0 ? (
+            <p className="rounded-2xl bg-background p-4 text-center text-sm font-medium text-ink/30">找不到符合條件的操作紀錄</p>
           ) : (
-            operationLogs.slice(0, 20).map(log => (
+            filteredOperationLogs.slice(0, 50).map(log => (
               <div key={log.id} className="rounded-2xl bg-background p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
@@ -6507,6 +6779,12 @@ export default function App() {
       }
 
       await batch.commit();
+      await addOperationLog('machine_update', 'machine', `${oldName || data.name} 機台設定已更新`, data.name, {
+        oldName,
+        newName: data.name,
+        variants: data.variants,
+        syncWithOrders
+      });
       showToast(syncWithOrders ? '機台設定與訂單已同步更新' : '機台設定已儲存');
       setEditingMachine(null);
     } catch (err: any) {
@@ -6569,6 +6847,9 @@ export default function App() {
           }
 
           await batch.commit();
+          await addOperationLog('machine_delete', 'machine', `已刪除機台：${machineName}`, machineName, {
+            deleteRelatedOrders: Boolean(checked)
+          });
           showToast('機台已刪除');
           setEditingMachine(null);
         } catch (err: any) {
@@ -6611,23 +6892,6 @@ export default function App() {
     setToast({ show: true, message, type });
     toastTimeoutRef.current = setTimeout(() => setToast(t => ({ ...t, show: false })), 3000);
   }, []);
-
-  const saveGoogleClientId = useCallback((clientId: string) => {
-    const trimmed = clientId.trim();
-    if (trimmed) {
-      localStorage.setItem(GOOGLE_CLIENT_ID_STORAGE_KEY, trimmed);
-      setGoogleClientId(trimmed);
-      setDriveStatus(prev => ({ ...prev, message: 'Google OAuth Client ID 已儲存，尚未連線 Google Drive' }));
-      loadGoogleIdentityScript().catch(() => {});
-      showToast('Google OAuth Client ID 已儲存');
-    } else {
-      localStorage.removeItem(GOOGLE_CLIENT_ID_STORAGE_KEY);
-      clearDriveToken();
-      setGoogleClientId(DEFAULT_GOOGLE_CLIENT_ID || '');
-      setDriveStatus(prev => ({ ...prev, latest: null, files: [], message: DEFAULT_GOOGLE_CLIENT_ID ? '已改用 Vercel 環境變數 Client ID' : '尚未設定 Google OAuth Client ID' }));
-      showToast('已清除本機 Google OAuth Client ID');
-    }
-  }, [showToast]);
 
   useEffect(() => {
     if (googleClientId) {
@@ -6972,6 +7236,8 @@ export default function App() {
 
       const cloudCounts = parseCounts(latest);
       const localCounts = getBackupCounts(customers, orders, machines, releases, operationLogs);
+      const localLatestAt = getLatestDataTime(customers, orders, machines, releases);
+      const cloudBackupAt = latest.createdTime || latest.modifiedTime;
       const proceed = async () => {
         setDriveStatus(prev => ({ ...prev, loading: true, message: '正在下載最新雲端備份...' }));
         const data = await downloadDriveBackup(token, latest.id);
@@ -6986,7 +7252,12 @@ export default function App() {
         setConfirmModal({
           show: true,
           title: '下載雲端備份',
-          message: `目前本地有 ${localCounts.totalRecords} 筆資料，雲端最新備份有 ${cloudCounts?.totalRecords ?? '未知'} 筆。下載後會先顯示匯入預覽，不會立刻覆蓋；按「開始匯入」才會取代本地資料。`,
+          message: [
+            `本地資料：${formatBackupCounts(localCounts)}。最後修改：${localLatestAt ? formatDateTime(localLatestAt) : '尚無'}。`,
+            `雲端備份：${formatBackupCounts(cloudCounts)}。備份時間：${cloudBackupAt ? formatDateTime(cloudBackupAt) : '未知'}。`,
+            getBackupFreshness(localLatestAt, cloudBackupAt),
+            '下載後只會顯示匯入預覽，不會立刻覆蓋；按「開始匯入」才會取代目前本地資料。'
+          ].join('\n'),
           type: 'info',
           onConfirm: proceed
         });
@@ -7058,9 +7329,9 @@ export default function App() {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (message.toLowerCase().includes('quota')) {
-        showToast('匯入失敗：瀏覽器本地儲存空間不足', 'error');
+        showToast(`匯入失敗：${getActionableErrorMessage(err)}`, 'error');
       } else {
-        showToast(`匯入失敗：${message}`, 'error');
+        showToast(`匯入失敗：${getActionableErrorMessage(err)}`, 'error');
       }
       handleLocalDataError(err, OperationType.WRITE, 'batch_import');
     } finally {
@@ -7082,7 +7353,7 @@ export default function App() {
         showToast('備份檔已讀取，請確認後開始匯入');
       } catch (err) {
         console.error(err);
-        showToast('備份檔格式不正確', 'error');
+        showToast(`備份檔格式不正確：${getActionableErrorMessage(err)}`, 'error');
       }
     };
     reader.readAsText(file);
@@ -7269,6 +7540,7 @@ export default function App() {
 
   // --- Tab Content ---
   const latestLocalAt = getLatestDataTime(customers, orders, machines, releases);
+  const localBackupCounts = getBackupCounts(customers, orders, machines, releases, operationLogs);
 
   // --- Render Helpers ---
   if (loading) return <LoadingScreen />;
@@ -7284,6 +7556,8 @@ export default function App() {
             latestLocalAt={latestLocalAt}
             lastBackupAt={settings?.lastBackupAt}
             lastDriveBackupAt={settings?.lastDriveBackupAt}
+            localCounts={localBackupCounts}
+            latestCloud={driveStatus.latest}
             driveEnabled={Boolean(googleClientId)}
             driveLoading={driveStatus.loading}
             onUpload={() => uploadDriveData(false)}
@@ -7369,7 +7643,6 @@ export default function App() {
                   operationLogs={operationLogs}
                   restoreFromLog={restoreFromLog}
                   googleClientId={googleClientId}
-                  saveGoogleClientId={saveGoogleClientId}
                   connectGoogleDrive={connectGoogleDrive}
                   logoutGoogleDrive={logoutGoogleDrive}
                   uploadDriveData={uploadDriveData}
@@ -7439,7 +7712,7 @@ export default function App() {
                 className="bg-card-white w-full max-w-sm p-8 rounded-3xl card-shadow"
               >
                 <h3 className="text-xl font-bold text-ink mb-4">{confirmModal.title}</h3>
-                <p className="text-ink/60 mb-6 leading-relaxed">{confirmModal.message}</p>
+                <p className="text-ink/60 mb-6 whitespace-pre-line leading-relaxed">{confirmModal.message}</p>
                 
                 {confirmModal.checkboxLabel && (
                   <label className="flex items-center gap-3 mb-8 cursor-pointer group">
