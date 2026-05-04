@@ -357,6 +357,141 @@ const findExistingMachineByAiResult = (machines: any[], aiMachineName: string, a
   return ranked[0]?.score >= 86 ? ranked[0] : null;
 };
 
+const compressImageFile = (file: File, maxWidth = 800, maxHeight = 800, quality = 0.7): Promise<string> => (
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = (event) => {
+      const img = new Image();
+      img.src = event.target?.result as string;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > maxWidth) {
+            height *= maxWidth / width;
+            width = maxWidth;
+          }
+        } else if (height > maxHeight) {
+          width *= maxHeight / height;
+          height = maxHeight;
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, width, height);
+          ctx.drawImage(img, 0, 0, width, height);
+        }
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = reject;
+    };
+    reader.onerror = reject;
+  })
+);
+
+const requestMachineRecognition = async (imageDataUrl: string, machines: any[]) => {
+  const base64String = imageDataUrl.split(',')[1] || imageDataUrl;
+  const apiKeys = [
+    process.env.GEMINI_API_KEY,
+    process.env.GEMINI_API_KEY_2,
+    process.env.GEMINI_API_KEY_3,
+    process.env.GEMINI_API_KEY_4,
+    process.env.GEMINI_API_KEY_5
+  ].filter(Boolean) as string[];
+
+  if (apiKeys.length === 0) throw new Error('No Gemini API keys configured');
+
+  let response;
+  let aiError;
+  const shuffledKeys = apiKeys.sort(() => Math.random() - 0.5);
+  for (const key of shuffledKeys) {
+    try {
+      const ai = new GoogleGenAI({ apiKey: key });
+      response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: [{
+          role: 'user',
+          parts: [
+            {
+              inlineData: {
+                data: base64String,
+                mimeType: 'image/jpeg'
+              }
+            },
+            {
+              text: '請分析此扭蛋機台圖片，並嚴格依照 JSON 格式回傳。若屬於既有機台，必須逐字使用既有機台名稱與款式。'
+            }
+          ]
+        }],
+        config: {
+          systemInstruction: `你是精通日文與台灣玩具圈用語的扭蛋辨識專家。請根據圖片可見資訊辨識機台名稱、價格、完整款式，並用繁體中文回傳。
+
+規則：
+1. 台灣譯名優先，不可使用中國大陸用語。例如 Baymax 使用「杯麵」，不可用「大白」。
+2. 款式名稱必須是「角色/款式名稱 + 目視特徵」，不可只有角色名。
+3. 請輸出 variantDetails：name 必須與 variants 逐字相同，originalName 填日文原文，feature 填目視特徵，aliases 填英文、日文、錯譯或不同地區用語。
+4. 既有資料庫優先。若圖片屬於既有機台，machineName 必須逐字回傳既有機台名稱，variants 優先逐字使用既有款式，避免重複翻譯。
+5. 英文、日文、台灣譯名要視為同一組候選。例如 MY MELODY / マイメロディ = 美樂蒂；ESTHER BUNNY / エスターバニー = 艾絲樂兔；ぷっくり = 胖嘟嘟；めじるし = 標記；アクセサリー / accessory = 飾品。
+6. 若圖片寫「ESTHER BUNNY MY MELODY ぷっくりめじるしアクセサリー」，且既有資料有「美樂蒂x艾絲樂兔 胖嘟嘟標記飾品」，必須回傳既有名稱。
+7. 機台名稱盡量保留核心商品名，去除行銷贅字。
+
+現有機台與款式：
+${machines.map(formatMachineForAiPrompt).join('\n')}`,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              machineName: { type: Type.STRING },
+              variants: { type: Type.ARRAY, items: { type: Type.STRING } },
+              price: { type: Type.NUMBER },
+              factCheckNotes: { type: Type.STRING },
+              sources: { type: Type.ARRAY, items: { type: Type.STRING } },
+              variantDetails: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING },
+                    originalName: { type: Type.STRING },
+                    feature: { type: Type.STRING },
+                    aliases: { type: Type.ARRAY, items: { type: Type.STRING } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      });
+      break;
+    } catch (err: any) {
+      console.warn('API Error with a key, trying next... ', err?.message);
+      aiError = err;
+    }
+  }
+
+  if (!response) throw aiError || new Error('All API keys failed.');
+  const result = JSON.parse(response.text || '{}');
+  const aiMachineName = optionalText(result.machineName);
+  const aiVariants = normalizeVariantNames(result.variants || (result.variant ? [result.variant] : []));
+  const variantDetails = normalizeAiVariantDetails(aiVariants, result.variantDetails);
+  const existingMachineMatch = findExistingMachineByAiResult(machines, aiMachineName, aiVariants);
+  return {
+    machineName: aiMachineName,
+    price: Number(result.price) || 0,
+    variants: aiVariants,
+    variantDetails,
+    existingMachineMatch,
+    factCheckNotes: optionalText(result.factCheckNotes),
+    sources: Array.isArray(result.sources) ? result.sources : []
+  };
+};
+
 const createDefaultVariantDetails = (variants: string[]): Record<string, MachineVariantDetail> => (
   variants.reduce<Record<string, MachineVariantDetail>>((acc, variant) => {
     acc[variant] = { name: variant, aliases: [], active: true };
@@ -425,6 +560,40 @@ const mergeVariantDetailsForExistingMachine = (
       originalName: incoming?.originalName || current.originalName,
       feature: incoming?.feature || current.feature || inferVariantFeatureFromName(variant),
       aliases: normalizeCustomerAliases([...(current.aliases || []), ...(incoming?.aliases || [])]),
+      active: current.active === false ? false : true
+    };
+    return acc;
+  }, {});
+};
+
+const fillBlankVariantDetailsOnly = (
+  existingVariants: string[],
+  existingRawDetails: any,
+  aiVariants: string[],
+  aiDetails: Record<string, MachineVariantDetail>
+) => {
+  const existingDetails = normalizeVariantDetails(existingVariants, existingRawDetails);
+  const aiDetailsByKey = new Map(
+    aiVariants
+      .map(variant => [normalizeVariantKey(variant), aiDetails[variant]] as const)
+      .filter((entry): entry is readonly [string, MachineVariantDetail] => Boolean(entry[1]))
+  );
+
+  return existingVariants.reduce<Record<string, MachineVariantDetail>>((acc, variant, index) => {
+    const current = existingDetails[variant] || { name: variant, aliases: [], active: true };
+    const incoming =
+      aiDetails[variant] ||
+      aiDetailsByKey.get(normalizeVariantKey(variant)) ||
+      (aiVariants.length === existingVariants.length ? aiDetails[aiVariants[index]] : undefined);
+
+    acc[variant] = {
+      ...current,
+      name: variant,
+      originalName: current.originalName || incoming?.originalName,
+      feature: current.feature || incoming?.feature,
+      aliases: (current.aliases || []).length > 0
+        ? current.aliases
+        : normalizeCustomerAliases(incoming?.aliases || []),
       active: current.active === false ? false : true
     };
     return acc;
@@ -3207,6 +3376,7 @@ const CustomersList = ({
 
 const MachineEditModal = ({
   machine,
+  machines,
   onClose,
   onSave,
   onDelete,
@@ -3217,6 +3387,7 @@ const MachineEditModal = ({
   setConfirmModal
 }: {
   machine: any;
+  machines: any[];
   onClose: () => void;
   onSave: (data: any, oldName: string, variantMapping: Record<string, string>, syncWithOrders: boolean) => Promise<void>;
   onDelete: (machineId: string, machineName: string) => void;
@@ -3237,6 +3408,7 @@ const MachineEditModal = ({
   const [editingVariantValue, setEditingVariantValue] = useState('');
   const [variantMapping, setVariantMapping] = useState<Record<string, string>>({});
   const [uploadedImage, setUploadedImage] = useState<string | null>(machine.imageUrl || null);
+  const [isRecognizing, setIsRecognizing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [editingItem, setEditingItem] = useState<{ orderId: string, item: OrderItem } | null>(null);
@@ -3290,44 +3462,34 @@ const MachineEditModal = ({
     }))
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const applyRecognitionToForm = async (imageDataUrl: string) => {
+    setIsRecognizing(true);
+    try {
+      showToast('正在重新辨識機台圖片...');
+      const result = await requestMachineRecognition(imageDataUrl, machines);
+      const nextDetails = fillBlankVariantDetailsOnly(
+        variantList,
+        variantDetails,
+        result.variants,
+        result.variantDetails
+      );
+
+      setVariantDetails(nextDetails);
+      showToast('已重新辨識，僅補上款式辨識資料的空白欄位');
+    } catch (err) {
+      console.error(err);
+      showToast(`重新辨識失敗：${getActionableErrorMessage(err)}`, 'error');
+    } finally {
+      setIsRecognizing(false);
+    }
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const img = new Image();
-        img.src = reader.result as string;
-        img.onload = () => {
-          const canvas = document.createElement('canvas');
-          const MAX_WIDTH = 800;
-          const MAX_HEIGHT = 800;
-          let width = img.width;
-          let height = img.height;
-
-          if (width > height) {
-            if (width > MAX_WIDTH) {
-              height *= MAX_WIDTH / width;
-              width = MAX_WIDTH;
-            }
-          } else {
-            if (height > MAX_HEIGHT) {
-              width *= MAX_HEIGHT / height;
-              height = MAX_HEIGHT;
-            }
-          }
-
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.fillStyle = '#FFFFFF';
-            ctx.fillRect(0, 0, width, height);
-            ctx.drawImage(img, 0, 0, width, height);
-          }
-          setUploadedImage(canvas.toDataURL('image/jpeg', 0.7));
-        };
-      };
-      reader.readAsDataURL(file);
+      const imageDataUrl = await compressImageFile(file);
+      setUploadedImage(imageDataUrl);
+      await applyRecognitionToForm(imageDataUrl);
     }
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
@@ -3341,41 +3503,13 @@ const MachineEditModal = ({
         const file = items[i].getAsFile();
         if (file) {
           e.preventDefault();
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            const img = new Image();
-            img.src = reader.result as string;
-            img.onload = () => {
-              const canvas = document.createElement('canvas');
-              const MAX_WIDTH = 800;
-              const MAX_HEIGHT = 800;
-              let width = img.width;
-              let height = img.height;
-
-              if (width > height) {
-                if (width > MAX_WIDTH) {
-                  height *= MAX_WIDTH / width;
-                  width = MAX_WIDTH;
-                }
-              } else {
-                if (height > MAX_HEIGHT) {
-                  width *= MAX_HEIGHT / height;
-                  height = MAX_HEIGHT;
-                }
-              }
-
-              canvas.width = width;
-              canvas.height = height;
-              const ctx = canvas.getContext('2d');
-              if (ctx) {
-                ctx.fillStyle = '#FFFFFF';
-                ctx.fillRect(0, 0, width, height);
-                ctx.drawImage(img, 0, 0, width, height);
-              }
-              setUploadedImage(canvas.toDataURL('image/jpeg', 0.7));
-            };
-          };
-          reader.readAsDataURL(file);
+          compressImageFile(file).then(async (imageDataUrl) => {
+            setUploadedImage(imageDataUrl);
+            await applyRecognitionToForm(imageDataUrl);
+          }).catch(err => {
+            console.error(err);
+            showToast(`圖片處理失敗：${getActionableErrorMessage(err)}`, 'error');
+          });
           break;
         }
       }
@@ -3492,7 +3626,7 @@ const MachineEditModal = ({
           <div>
             <div className="flex justify-between items-center mb-2">
               <label className="text-xs font-bold text-ink/40 uppercase tracking-widest">機台圖片</label>
-              <div>
+              <div className="flex items-center gap-2">
                 <input 
                   type="file" 
                   accept="image/*" 
@@ -3500,12 +3634,23 @@ const MachineEditModal = ({
                   ref={fileInputRef}
                   onChange={handleImageUpload}
                 />
+                {uploadedImage && (
+                  <button
+                    onClick={() => uploadedImage && applyRecognitionToForm(uploadedImage)}
+                    disabled={isRecognizing}
+                    className="px-3 py-1.5 bg-card-white text-ink/60 rounded-xl text-xs font-bold flex items-center gap-1 hover:bg-ink/5 transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw className={cn("w-3 h-3", isRecognizing && "animate-spin")} />
+                    {isRecognizing ? '辨識中' : '重新辨識'}
+                  </button>
+                )}
                 <button 
                   onClick={() => fileInputRef.current?.click()}
+                  disabled={isRecognizing}
                   className="px-3 py-1.5 bg-primary-blue/10 text-primary-blue rounded-xl text-xs font-bold flex items-center gap-1 hover:bg-primary-blue/20 transition-colors"
                 >
                   <Upload className="w-3 h-3" />
-                  上傳圖片
+                  {isRecognizing ? '辨識中' : '上傳圖片'}
                 </button>
               </div>
             </div>
@@ -3875,11 +4020,15 @@ const MachineManagement = ({
   const [name, setName] = useState('');
   const [price, setPrice] = useState('');
   const [variantList, setVariantList] = useState<string[]>([]);
+  const [variantDetails, setVariantDetails] = useState<Record<string, MachineVariantDetail>>({});
   const [newVariant, setNewVariant] = useState('');
   const [editingVariantIndex, setEditingVariantIndex] = useState<number | null>(null);
   const [editingVariantValue, setEditingVariantValue] = useState('');
   const [viewMode, setViewMode] = useState<'list' | 'grid-sm' | 'grid-lg'>('list');
   const [machineSearchTerm, setMachineSearchTerm] = useState('');
+  const [uploadedImage, setUploadedImage] = useState<string | null>(null);
+  const [isRecognizing, setIsRecognizing] = useState(false);
+  const addMachineFileInputRef = useRef<HTMLInputElement>(null);
 
   // Derive all unique machine names from orders
   const machineNamesFromOrders = Array.from(new Set(orders.flatMap(o => o.items.map(i => i.machineName))));
@@ -3962,7 +4111,8 @@ const MachineManagement = ({
       name,
       defaultPrice: parseInt(price) || 0,
       variants: variantList,
-      variantDetails: createDefaultVariantDetails(variantList),
+      variantDetails: normalizeVariantDetails(variantList, variantDetails),
+      imageUrl: uploadedImage,
       createdAt: now,
       updatedAt: now
     };
@@ -3987,20 +4137,33 @@ const MachineManagement = ({
     setName('');
     setPrice('');
     setVariantList([]);
+    setVariantDetails({});
     setNewVariant('');
     setEditingVariantIndex(null);
     setEditingVariantValue('');
+    setUploadedImage(null);
+    if (addMachineFileInputRef.current) addMachineFileInputRef.current.value = '';
   };
 
   const addVariant = () => {
     if (newVariant.trim() && !variantList.includes(newVariant.trim())) {
-      setVariantList([...variantList, newVariant.trim()]);
+      const variantName = newVariant.trim();
+      setVariantList([...variantList, variantName]);
+      setVariantDetails(prev => ({
+        ...prev,
+        [variantName]: prev[variantName] || { name: variantName, aliases: [], active: true }
+      }));
       setNewVariant('');
     }
   };
 
   const removeVariant = (v: string) => {
     setVariantList(variantList.filter(item => item !== v));
+    setVariantDetails(prev => {
+      const next = { ...prev };
+      delete next[v];
+      return next;
+    });
   };
 
   const startEditingVariant = (index: number, value: string) => {
@@ -4017,11 +4180,56 @@ const MachineManagement = ({
         const newList = [...variantList];
         newList[editingVariantIndex] = newVal;
         setVariantList(newList);
+        setVariantDetails(prev => {
+          const next = { ...prev };
+          const previousDetail = next[oldVal] || { name: oldVal, aliases: [], active: true };
+          delete next[oldVal];
+          next[newVal] = { ...previousDetail, name: newVal };
+          return next;
+        });
       }
       
       setEditingVariantIndex(null);
       setEditingVariantValue('');
     }
+  };
+
+  const applyNewMachineRecognition = async (imageDataUrl: string) => {
+    setIsRecognizing(true);
+    try {
+      showToast('正在辨識機台圖片...');
+      const result = await requestMachineRecognition(imageDataUrl, machines);
+      const matchedMachine = result.existingMachineMatch?.machine;
+      const nextName = matchedMachine?.name || result.machineName || name;
+      const nextPrice = matchedMachine?.defaultPrice || result.price || Number(price) || 0;
+      const nextVariants = matchedMachine?.variants?.length ? matchedMachine.variants : result.variants;
+      const nextDetails = matchedMachine
+        ? mergeVariantDetailsForExistingMachine(nextVariants, matchedMachine.variantDetails, result.variants, result.variantDetails)
+        : normalizeVariantDetails(nextVariants, result.variantDetails);
+
+      setName(nextName);
+      setPrice(String(nextPrice));
+      setVariantList(nextVariants);
+      setVariantDetails(nextDetails);
+      showToast(matchedMachine
+        ? `已辨識到疑似既有機台「${matchedMachine.name}」，已套用資料`
+        : '已辨識圖片並填入新增機台資料');
+    } catch (err) {
+      console.error(err);
+      showToast(`圖片辨識失敗：${getActionableErrorMessage(err)}`, 'error');
+    } finally {
+      setIsRecognizing(false);
+    }
+  };
+
+  const handleAddMachineImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const imageDataUrl = await compressImageFile(file);
+      setUploadedImage(imageDataUrl);
+      await applyNewMachineRecognition(imageDataUrl);
+    }
+    if (addMachineFileInputRef.current) addMachineFileInputRef.current.value = '';
   };
 
   return (
@@ -4045,6 +4253,60 @@ const MachineManagement = ({
             value={price}
             onChange={(e) => setPrice(e.target.value)}
           />
+        </div>
+
+        <div className="mb-4">
+          <div className="flex items-center justify-between mb-2">
+            <label className="text-xs font-bold text-ink/40 uppercase tracking-widest">機台圖片辨識</label>
+            <div className="flex items-center gap-2">
+              <input
+                ref={addMachineFileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={handleAddMachineImageUpload}
+              />
+              {uploadedImage && (
+                <button
+                  onClick={() => applyNewMachineRecognition(uploadedImage)}
+                  disabled={isRecognizing}
+                  className="px-3 py-1.5 bg-background text-ink/60 rounded-xl text-xs font-bold flex items-center gap-1 hover:bg-ink/5 transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw className={cn("w-3 h-3", isRecognizing && "animate-spin")} />
+                  {isRecognizing ? '辨識中' : '重新辨識'}
+                </button>
+              )}
+              <button
+                onClick={() => addMachineFileInputRef.current?.click()}
+                disabled={isRecognizing}
+                className="px-3 py-1.5 bg-primary-blue/10 text-primary-blue rounded-xl text-xs font-bold flex items-center gap-1 hover:bg-primary-blue/20 transition-colors disabled:opacity-50"
+              >
+                <Upload className="w-3 h-3" />
+                {isRecognizing ? '辨識中' : '上傳圖片辨識'}
+              </button>
+            </div>
+          </div>
+          {uploadedImage ? (
+            <div className="relative group">
+              <div className="w-full h-48 rounded-2xl overflow-hidden bg-background border border-divider">
+                <img src={uploadedImage || undefined} alt="Machine" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+              </div>
+              <button
+                onClick={() => setUploadedImage(null)}
+                className="absolute top-2 right-2 p-2 bg-white/80 hover:bg-white rounded-full shadow-sm text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
+            <div
+              onClick={() => addMachineFileInputRef.current?.click()}
+              className="w-full h-28 rounded-2xl border-2 border-dashed border-divider flex flex-col items-center justify-center text-ink/30 cursor-pointer hover:bg-background hover:border-primary-blue/30 transition-colors"
+            >
+              <Package className="w-7 h-7 mb-2 opacity-50" />
+              <span className="text-sm font-bold">點擊上傳圖片，自動填入名稱、金額與款式</span>
+            </div>
+          )}
         </div>
 
         <div className="mb-4">
@@ -7920,6 +8182,7 @@ export default function App() {
           {editingMachine && (
             <MachineEditModal 
               machine={editingMachine}
+              machines={machines}
               onClose={() => setEditingMachine(null)}
               onSave={handleSaveEditedMachine}
               onDelete={handleDeleteMachine}
