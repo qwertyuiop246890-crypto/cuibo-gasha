@@ -278,12 +278,98 @@ const normalizeVariantNames = (variants: any): string[] => {
   ));
 };
 
+const MACHINE_ALIAS_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/my\s*melody|マイメロディ|美樂蒂/g, '美樂蒂'],
+  [/esther\s*bunny|エスターバニー|艾絲樂兔|艾絲特兔/g, '艾絲樂兔'],
+  [/ぷっくり|胖嘟嘟|澎澎|立體/g, '胖嘟嘟'],
+  [/めじるし|めじるしアクセサリー|marker|marking|標記|標誌/g, '標記'],
+  [/accessories|accessory|アクセサリー|吊飾|掛飾|飾品/g, '飾品'],
+  [/kuromi|クロミ|酷洛米|庫洛米/g, '酷洛米'],
+  [/cinnamoroll|シナモロール|大耳狗|玉桂狗/g, '大耳狗'],
+  [/pochacco|ポチャッコ|帕恰狗|帕恰狗/g, '帕恰狗'],
+  [/pompompurin|ポムポムプリン|布丁狗/g, '布丁狗'],
+  [/hello\s*kitty|ハローキティ|凱蒂貓|kitty/g, '凱蒂貓']
+];
+
+const MACHINE_MATCH_TERMS = [
+  '美樂蒂',
+  '艾絲樂兔',
+  '胖嘟嘟',
+  '標記',
+  '飾品',
+  '酷洛米',
+  '大耳狗',
+  '帕恰狗',
+  '布丁狗',
+  '凱蒂貓'
+];
+
+const normalizeMachineLookupText = (value: string) => {
+  let normalized = String(value || '').toLowerCase();
+  MACHINE_ALIAS_REPLACEMENTS.forEach(([pattern, replacement]) => {
+    normalized = normalized.replace(pattern, replacement);
+  });
+  return normalized.replace(/[\s　x×✕＋+&＆♡❤♥・･\-—＿_（）()【】\[\]「」『』:：/／.,，。]+/g, '');
+};
+
+const getMachineLookupSource = (machine: any) => {
+  const variants = normalizeVariantNames(machine?.variants);
+  const details = normalizeVariantDetails(variants, machine?.variantDetails);
+  return [
+    machine?.name,
+    ...variants,
+    ...variants.flatMap(variant => {
+      const detail = details[variant];
+      return [
+        detail?.originalName,
+        detail?.feature,
+        ...(detail?.aliases || [])
+      ];
+    })
+  ].filter(Boolean).join(' ');
+};
+
+const scoreMachineCandidateMatch = (machine: any, aiMachineName: string, aiVariants: string[]) => {
+  const inputText = normalizeMachineLookupText([aiMachineName, ...aiVariants].join(' '));
+  const machineText = normalizeMachineLookupText(getMachineLookupSource(machine));
+  if (!inputText || !machineText) return 0;
+  if (inputText === machineText) return 100;
+  if (inputText.includes(machineText) || machineText.includes(inputText)) return 95;
+
+  const matchedTerms = MACHINE_MATCH_TERMS.filter(term => {
+    const normalizedTerm = normalizeMachineLookupText(term);
+    return inputText.includes(normalizedTerm) && machineText.includes(normalizedTerm);
+  });
+  if (matchedTerms.length >= 4) return 92;
+  if (matchedTerms.length >= 3) return 86;
+  if (matchedTerms.length >= 2) return 76;
+
+  return 0;
+};
+
+const findExistingMachineByAiResult = (machines: any[], aiMachineName: string, aiVariants: string[]) => {
+  const ranked = machines
+    .map(machine => ({
+      machine,
+      score: scoreMachineCandidateMatch(machine, aiMachineName, aiVariants)
+    }))
+    .sort((a, b) => b.score - a.score);
+  return ranked[0]?.score >= 86 ? ranked[0] : null;
+};
+
 const createDefaultVariantDetails = (variants: string[]): Record<string, MachineVariantDetail> => (
   variants.reduce<Record<string, MachineVariantDetail>>((acc, variant) => {
     acc[variant] = { name: variant, aliases: [], active: true };
     return acc;
   }, {})
 );
+
+const normalizeVariantKey = (value: string) => value.replace(/\s+/g, '').toLowerCase();
+
+const inferVariantFeatureFromName = (variant: string) => {
+  const parts = variant.trim().split(/\s+/).filter(Boolean);
+  return parts.length > 1 ? parts.slice(1).join(' ') : undefined;
+};
 
 const normalizeVariantDetails = (variants: string[], rawDetails: any): Record<string, MachineVariantDetail> => {
   const source = rawDetails && typeof rawDetails === 'object' && !Array.isArray(rawDetails) ? rawDetails : {};
@@ -294,7 +380,7 @@ const normalizeVariantDetails = (variants: string[], rawDetails: any): Record<st
     acc[variant] = {
       name: optionalText(raw.name) || variant,
       originalName: optionalText(raw.originalName),
-      feature: optionalText(raw.feature),
+      feature: optionalText(raw.feature) || inferVariantFeatureFromName(variant),
       aliases: normalizeCustomerAliases(raw.aliases),
       active: raw.active === false ? false : true
     };
@@ -311,6 +397,38 @@ const normalizeAiVariantDetails = (variants: string[], rawDetails: any): Record<
       }, {})
     : rawDetails;
   return normalizeVariantDetails(variants, source);
+};
+
+const mergeVariantDetailsForExistingMachine = (
+  existingVariants: string[],
+  existingRawDetails: any,
+  aiVariants: string[],
+  aiDetails: Record<string, MachineVariantDetail>
+) => {
+  const existingDetails = normalizeVariantDetails(existingVariants, existingRawDetails);
+  const aiDetailsByKey = new Map(
+    aiVariants
+      .map(variant => [normalizeVariantKey(variant), aiDetails[variant]] as const)
+      .filter((entry): entry is readonly [string, MachineVariantDetail] => Boolean(entry[1]))
+  );
+
+  return existingVariants.reduce<Record<string, MachineVariantDetail>>((acc, variant, index) => {
+    const current = existingDetails[variant] || { name: variant, aliases: [], active: true };
+    const incoming =
+      aiDetails[variant] ||
+      aiDetailsByKey.get(normalizeVariantKey(variant)) ||
+      (aiVariants.length === existingVariants.length ? aiDetails[aiVariants[index]] : undefined);
+
+    acc[variant] = {
+      ...current,
+      name: variant,
+      originalName: incoming?.originalName || current.originalName,
+      feature: incoming?.feature || current.feature || inferVariantFeatureFromName(variant),
+      aliases: normalizeCustomerAliases([...(current.aliases || []), ...(incoming?.aliases || [])]),
+      active: current.active === false ? false : true
+    };
+    return acc;
+  }, {});
 };
 
 const formatMachineForAiPrompt = (machine: any) => {
@@ -1316,19 +1434,47 @@ const CreateOrder = ({
   const [isFullscreenImage, setIsFullscreenImage] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const applyAiCandidate = (candidate = aiCandidate) => {
+  const applyAiCandidate = async (candidate = aiCandidate) => {
     if (!candidate) return;
-    setMachineName(candidate.existingMachine?.name || candidate.machineName);
-    setPrice(candidate.existingMachine?.defaultPrice || candidate.price || price);
-    setAiVariantDetails(candidate.variantDetails);
-    setOrderItems((candidate.variants.length > 0 ? candidate.variants : ['']).map((variant) => ({
-      id: crypto.randomUUID(),
-      variant,
-      quantity: 1,
-      isEco: false
-    })));
-    setAiCandidate(null);
-    showToast(candidate.existingMachine ? `已套用既有機台「${candidate.existingMachine.name}」` : '已套用 AI 建議，請確認後新增');
+    try {
+      if (candidate.existingMachine?.id) {
+        const undoSnapshot = await createRestoreSnapshot();
+        const variantsToSave = candidate.variants.length > 0
+          ? candidate.variants
+          : normalizeVariantNames(candidate.existingMachine.variants || []);
+        const detailsToSave = normalizeVariantDetails(variantsToSave, candidate.variantDetails);
+        await updateDoc(dbDoc('machines', candidate.existingMachine.id), {
+          variants: variantsToSave,
+          variantDetails: detailsToSave,
+          updatedAt: new Date().toISOString()
+        });
+        await addOperationLog(
+          'machine_variant_details_update',
+          'machine',
+          `${candidate.existingMachine.name} 補上款式辨識資料`,
+          candidate.existingMachine.name,
+          {
+            undoSnapshot,
+            variants: variantsToSave
+          }
+        );
+      }
+
+      setMachineName(candidate.existingMachine?.name || candidate.machineName);
+      setPrice(candidate.existingMachine?.defaultPrice || candidate.price || price);
+      setAiVariantDetails(candidate.variantDetails);
+      setOrderItems((candidate.variants.length > 0 ? candidate.variants : ['']).map((variant) => ({
+        id: crypto.randomUUID(),
+        variant,
+        quantity: 1,
+        isEco: false
+      })));
+      setAiCandidate(null);
+      showToast(candidate.existingMachine ? `已套用既有機台「${candidate.existingMachine.name}」並補上結構化資料` : '已套用 AI 建議，請確認後新增');
+    } catch (err) {
+      console.error(err);
+      showToast(`候選套用失敗：${getActionableErrorMessage(err)}`, 'error');
+    }
   };
 
   const processImage = async (file: File) => {
@@ -1530,6 +1676,13 @@ const CreateOrder = ({
 
 [既有資料庫優先]
 在產生任何新名稱前，請先比對以下已建立機台與款式。若圖片中的商品屬於既有機台，machineName 必須逐字回傳既有機台名稱，variants 必須優先逐字使用該機台已建立款式，不得另創其他翻譯版本。
+比對時必須把英文、日文、台灣譯名視為同一組候選，不可因語言不同而判斷成新機台。常見同義例：
+- MY MELODY / マイメロディ = 美樂蒂。
+- ESTHER BUNNY / エスターバニー = 艾絲樂兔。
+- ぷっくり = 胖嘟嘟。
+- めじるし / marker = 標記。
+- accessory / アクセサリー / 吊飾 / 掛飾 = 飾品。
+例如圖片若寫「ESTHER BUNNY MY MELODY ぷっくりめじるしアクセサリー」，而既有資料有「美樂蒂x艾絲樂兔 胖嘟嘟標記飾品」，必須回傳既有機台名稱「美樂蒂x艾絲樂兔 胖嘟嘟標記飾品」。
 現有機台與款式：
 ${machines.map(formatMachineForAiPrompt).join('\n')}
 
@@ -1634,33 +1787,31 @@ ${machines.map(formatMachineForAiPrompt).join('\n')}
         const aiMachineName = result.machineName || '';
         const aiVariants = normalizeVariantNames(result.variants || (result.variant ? [result.variant] : []));
         const detectedVariantDetails = normalizeAiVariantDetails(aiVariants, result.variantDetails);
-        const normalizeMachineName = (value: string) => value.toLowerCase().replace(/[\s　・･\-—＿_（）()【】\[\]]+/g, '');
         
-        // 檢查 AI 回傳的機台名稱是否已存在；若只是空格或標點差異，也優先沿用既有資料。
-        const normalizedAiMachineName = normalizeMachineName(aiMachineName);
-        const existingMachineByName = machines.find(m => {
-          const normalizedExistingName = normalizeMachineName(m.name);
-          return normalizedExistingName === normalizedAiMachineName ||
-            (normalizedAiMachineName.length >= 4 && normalizedExistingName.includes(normalizedAiMachineName)) ||
-            (normalizedExistingName.length >= 4 && normalizedAiMachineName.includes(normalizedExistingName));
-        });
+        // 檢查 AI 回傳的機台名稱是否已存在；同時比對英日文別名、款式、特徵與既有結構化資料。
+        const existingMachineMatch = findExistingMachineByAiResult(machines, aiMachineName, aiVariants);
+        const existingMachineByName = existingMachineMatch?.machine;
         
         if (existingMachineByName) {
-          const mergedDetails = {
-            ...normalizeVariantDetails(existingMachineByName.variants || [], existingMachineByName.variantDetails),
-            ...detectedVariantDetails
-          };
+          const candidateVariants = existingMachineByName.variants && existingMachineByName.variants.length > 0 ? existingMachineByName.variants : aiVariants;
+          const mergedDetails = mergeVariantDetailsForExistingMachine(
+            candidateVariants,
+            existingMachineByName.variantDetails,
+            aiVariants,
+            detectedVariantDetails
+          );
           setAiCandidate({
             source: 'ai',
             machineName: existingMachineByName.name,
             price: existingMachineByName.defaultPrice,
-            variants: existingMachineByName.variants && existingMachineByName.variants.length > 0 ? existingMachineByName.variants : aiVariants,
+            variants: candidateVariants,
             variantDetails: mergedDetails,
             existingMachine: existingMachineByName,
+            similarity: existingMachineMatch.score,
             factCheckNotes: result.factCheckNotes,
             sources: Array.isArray(result.sources) ? result.sources : []
           });
-          showToast(`AI 找到疑似既有機台「${existingMachineByName.name}」，請確認後套用`, 'success');
+          showToast(`AI 找到疑似既有機台「${existingMachineByName.name}」（比對 ${existingMachineMatch.score}%），請確認後套用`, 'success');
         } else {
           setAiCandidate({
             source: 'ai',
@@ -6403,6 +6554,7 @@ const SettingsView = ({
     order: '訂單',
     machine_create: '建立機台',
     machine_update: '修改機台',
+    machine_variant_details_update: '補上機台款式辨識資料',
     machine_delete: '刪除機台',
     machine: '機台',
     customer_delete: '刪除顧客',
