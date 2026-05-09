@@ -5800,13 +5800,20 @@ const estimatePrintItemUnits = (item: OrderItem, densityMode: PrintDensityMode) 
 };
 
 const sortPrintItems = (items: OrderItem[]) => {
+  const getProductName = (item: OrderItem) => `${item.machineName || ''} ${item.variant || ''}`.trim();
   return [...items].sort((a, b) => {
-    if (a.machineName === b.machineName) {
-      const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-      const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-      return aTime - bTime;
-    }
-    return a.machineName.localeCompare(b.machineName, 'zh-Hant');
+    const productCompare = getProductName(a).localeCompare(getProductName(b), 'zh-Hant', {
+      numeric: true,
+      sensitivity: 'base'
+    });
+    if (productCompare !== 0) return productCompare;
+
+    const priceCompare = a.price - b.price;
+    if (priceCompare !== 0) return priceCompare;
+
+    const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+    const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    return aTime - bTime;
   });
 };
 
