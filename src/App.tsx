@@ -1350,12 +1350,22 @@ const startGoogleDriveRedirect = (action: DriveRedirectAction) => {
     response_type: 'token',
     scope: GOOGLE_DRIVE_SCOPE,
     include_granted_scopes: 'true',
+    prompt: 'consent',
+    hl: 'zh-TW',
     state
   });
   window.location.assign(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`);
 };
 
 const consumeGoogleDriveRedirect = (): { token: string; action: DriveRedirectAction } | null => {
+  if (window.location.hash.includes('error=')) {
+    const params = new URLSearchParams(window.location.hash.slice(1));
+    const error = params.get('error') || 'Google 授權失敗';
+    const description = params.get('error_description') || '';
+    clearDriveRedirectPending();
+    window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.search}`);
+    throw new Error(`Google 授權失敗：${description || error}`);
+  }
   if (!window.location.hash.includes('access_token=')) return null;
   const params = new URLSearchParams(window.location.hash.slice(1));
   const token = params.get('access_token');
@@ -8050,7 +8060,21 @@ export default function App() {
 
   useEffect(() => {
     if (!localDataReady) return;
-    const redirectResult = consumeGoogleDriveRedirect();
+    let redirectResult: { token: string; action: DriveRedirectAction } | null = null;
+    try {
+      redirectResult = consumeGoogleDriveRedirect();
+    } catch (err) {
+      const message = getDriveErrorMessage(err);
+      clearDriveToken();
+      setDriveStatus(prev => ({
+        ...prev,
+        connected: false,
+        loading: false,
+        message
+      }));
+      showToast(message, 'error');
+      return;
+    }
     if (!redirectResult) return;
 
     showToast('Google 授權完成，正在接續雲端備份操作');
