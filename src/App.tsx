@@ -1021,30 +1021,35 @@ const isMobileDriveAuthContext = () => {
 
 const getStoredDriveToken = () => {
   try {
-    const raw = sessionStorage.getItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY);
+    const raw = sessionStorage.getItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY) || localStorage.getItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed?.token || !parsed?.expiresAt) return null;
     if (Date.now() > Number(parsed.expiresAt) - 60 * 1000) {
       sessionStorage.removeItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY);
+      localStorage.removeItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY);
       return null;
     }
     return parsed.token as string;
   } catch {
     sessionStorage.removeItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY);
+    localStorage.removeItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY);
     return null;
   }
 };
 
 const storeDriveToken = (token: string, expiresInSeconds = 3600) => {
-  sessionStorage.setItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY, JSON.stringify({
+  const payload = JSON.stringify({
     token,
     expiresAt: Date.now() + expiresInSeconds * 1000
-  }));
+  });
+  sessionStorage.setItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY, payload);
+  localStorage.setItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY, payload);
 };
 
 const clearDriveToken = () => {
   sessionStorage.removeItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY);
+  localStorage.removeItem(GOOGLE_DRIVE_TOKEN_STORAGE_KEY);
 };
 
 declare global {
@@ -1197,16 +1202,13 @@ const driveFetch = async (url: string, token: string, init: RequestInit = {}) =>
 };
 
 const validateDriveToken = async (token: string) => {
-  const response = await fetch(`https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=${encodeURIComponent(token)}`);
-  if (!response.ok) {
-    throw new Error('Google Drive token 驗證失敗，請重新授權。');
-  }
-  const info = await response.json();
-  const scopes = typeof info.scope === 'string' ? info.scope.split(/\s+/) : [];
-  if (!scopes.includes(GOOGLE_DRIVE_SCOPE)) {
-    throw new Error('Google Drive 授權範圍不足，請重新授權並允許 Drive 備份權限。');
-  }
-  return info;
+  const params = new URLSearchParams({
+    spaces: 'appDataFolder',
+    pageSize: '1',
+    fields: 'files(id)'
+  });
+  const response = await driveFetch(`https://www.googleapis.com/drive/v3/files?${params.toString()}`, token);
+  return response.json();
 };
 
 const listDriveBackups = async (token: string): Promise<DriveBackupFile[]> => {
@@ -1301,6 +1303,21 @@ const isDriveAuthError = (err: unknown) => {
     message.includes('授權範圍不足');
 };
 
+const handleDriveAuthExpired = (
+  setDriveStatus: React.Dispatch<React.SetStateAction<any>>,
+  showToast: (message: string, type?: 'success' | 'error') => void
+) => {
+  clearDriveToken();
+  const message = 'Google 授權已失效。請按「登入/重新授權」重新授權後，再按一次上傳或下載。';
+  setDriveStatus(prev => ({
+    ...prev,
+    connected: false,
+    loading: false,
+    message
+  }));
+  showToast(message, 'error');
+};
+
 type DriveRedirectAction = 'upload' | 'download' | 'refresh';
 
 const saveDriveRedirectPending = (state: string, action: DriveRedirectAction) => {
@@ -1377,7 +1394,11 @@ const consumeGoogleDriveRedirect = (): { token: string; action: DriveRedirectAct
   clearDriveRedirectPending();
   window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.search}`);
 
-  if (!token || !state || !pending || state !== pending.state) return null;
+  if (!token) return null;
+  if (!state || !pending || state !== pending.state) {
+    storeDriveToken(token, expiresIn);
+    return { token, action: 'refresh' };
+  }
   storeDriveToken(token, expiresIn);
   return { token, action: pending.action };
 };
@@ -7746,10 +7767,8 @@ export default function App() {
         startGoogleDriveRedirect('refresh');
         return;
       }
-      if (allowRedirectRetry && isDriveAuthError(err)) {
-        clearDriveToken();
-        showToast('Google 授權已失效，正在重新授權', 'error');
-        startGoogleDriveRedirect('refresh');
+      if (isDriveAuthError(err)) {
+        handleDriveAuthExpired(setDriveStatus, showToast);
         return;
       }
       const message = getDriveErrorMessage(err);
@@ -7805,10 +7824,8 @@ export default function App() {
         startGoogleDriveRedirect('upload');
         return;
       }
-      if (allowRedirectRetry && isDriveAuthError(err)) {
-        clearDriveToken();
-        showToast('Google 授權已失效，正在重新授權', 'error');
-        startGoogleDriveRedirect('upload');
+      if (isDriveAuthError(err)) {
+        handleDriveAuthExpired(setDriveStatus, showToast);
         return;
       }
       const message = getDriveErrorMessage(err);
@@ -7872,10 +7889,8 @@ export default function App() {
         startGoogleDriveRedirect('download');
         return;
       }
-      if (allowRedirectRetry && isDriveAuthError(err)) {
-        clearDriveToken();
-        showToast('Google 授權已失效，正在重新授權', 'error');
-        startGoogleDriveRedirect('download');
+      if (isDriveAuthError(err)) {
+        handleDriveAuthExpired(setDriveStatus, showToast);
         return;
       }
       const message = getDriveErrorMessage(err);
