@@ -999,6 +999,7 @@ const GOOGLE_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 const GOOGLE_CLIENT_ID_STORAGE_KEY = 'cuibo_gasha_google_client_id';
 const GOOGLE_DRIVE_REDIRECT_STATE_KEY = 'cuibo_gasha_drive_redirect_state';
 const GOOGLE_DRIVE_REDIRECT_ACTION_KEY = 'cuibo_gasha_drive_redirect_action';
+const GOOGLE_DRIVE_REDIRECT_PENDING_KEY = 'cuibo_gasha_drive_redirect_pending';
 const GOOGLE_DRIVE_TOKEN_STORAGE_KEY = 'cuibo_gasha_drive_token';
 const DEFAULT_GOOGLE_CLIENT_ID = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID as string | undefined;
 
@@ -1008,6 +1009,13 @@ const getGoogleClientId = () => {
 
 const getGoogleAuthOrigin = () => window.location.origin;
 const getGoogleAuthRedirectUri = () => `${window.location.origin}${window.location.pathname}`;
+
+const isMobileDriveAuthContext = () => {
+  const ua = navigator.userAgent || '';
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(ua);
+  const isStandalone = window.matchMedia?.('(display-mode: standalone)').matches || (navigator as any).standalone === true;
+  return isMobile || isStandalone;
+};
 
 const getStoredDriveToken = () => {
   try {
@@ -1142,8 +1150,10 @@ const requestGoogleDriveToken = async () => {
     throw new Error('尚未設定 VITE_GOOGLE_CLIENT_ID，請先建立 Google OAuth Client ID 後填入 Vercel 環境變數。');
   }
   if (!window.google?.accounts?.oauth2) {
-    loadGoogleIdentityScript().catch(() => {});
-    throw new Error('Google 授權元件尚未載入完成，請等 1 秒後再按一次。');
+    await loadGoogleIdentityScript();
+  }
+  if (isMobileDriveAuthContext()) {
+    throw new Error('mobile_redirect_required');
   }
 
   return new Promise<string>((resolve, reject) => {
@@ -1264,15 +1274,21 @@ const downloadDriveBackup = async (token: string, fileId: string) => {
 
 const getDriveErrorMessage = (err: unknown) => {
   const message = err instanceof Error ? err.message : String(err);
-  if (message.toLowerCase().includes('popup')) {
-    return 'Google 授權視窗被瀏覽器阻擋，系統將改用同頁授權。';
+  if (isDrivePopupError(err)) {
+    return 'Google 授權視窗被手機瀏覽器阻擋，系統將改用同頁授權。';
   }
   return message;
 };
 
 const isDrivePopupError = (err: unknown) => {
   const message = err instanceof Error ? err.message : String(err);
-  return message.toLowerCase().includes('popup');
+  const lower = message.toLowerCase();
+  return lower.includes('popup') ||
+    lower.includes('blocked') ||
+    lower.includes('closed') ||
+    lower.includes('iframe') ||
+    lower.includes('initialization') ||
+    lower.includes('mobile_redirect_required');
 };
 
 const isDriveAuthError = (err: unknown) => {
@@ -1285,14 +1301,47 @@ const isDriveAuthError = (err: unknown) => {
 
 type DriveRedirectAction = 'upload' | 'download' | 'refresh';
 
+const saveDriveRedirectPending = (state: string, action: DriveRedirectAction) => {
+  const payload = JSON.stringify({ state, action, createdAt: Date.now() });
+  sessionStorage.setItem(GOOGLE_DRIVE_REDIRECT_STATE_KEY, state);
+  sessionStorage.setItem(GOOGLE_DRIVE_REDIRECT_ACTION_KEY, action);
+  localStorage.setItem(GOOGLE_DRIVE_REDIRECT_PENDING_KEY, payload);
+};
+
+const clearDriveRedirectPending = () => {
+  sessionStorage.removeItem(GOOGLE_DRIVE_REDIRECT_STATE_KEY);
+  sessionStorage.removeItem(GOOGLE_DRIVE_REDIRECT_ACTION_KEY);
+  localStorage.removeItem(GOOGLE_DRIVE_REDIRECT_PENDING_KEY);
+};
+
+const getDriveRedirectPending = () => {
+  const state = sessionStorage.getItem(GOOGLE_DRIVE_REDIRECT_STATE_KEY);
+  const action = sessionStorage.getItem(GOOGLE_DRIVE_REDIRECT_ACTION_KEY) as DriveRedirectAction | null;
+  if (state && action) return { state, action };
+
+  try {
+    const raw = localStorage.getItem(GOOGLE_DRIVE_REDIRECT_PENDING_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { state?: string; action?: DriveRedirectAction; createdAt?: number };
+    const expired = !parsed.createdAt || Date.now() - parsed.createdAt > 10 * 60 * 1000;
+    if (!parsed.state || !parsed.action || expired) {
+      clearDriveRedirectPending();
+      return null;
+    }
+    return { state: parsed.state, action: parsed.action };
+  } catch {
+    clearDriveRedirectPending();
+    return null;
+  }
+};
+
 const startGoogleDriveRedirect = (action: DriveRedirectAction) => {
   const clientId = getGoogleClientId();
   if (!clientId) {
     throw new Error('尚未設定 Google OAuth Client ID');
   }
   const state = crypto.randomUUID();
-  sessionStorage.setItem(GOOGLE_DRIVE_REDIRECT_STATE_KEY, state);
-  sessionStorage.setItem(GOOGLE_DRIVE_REDIRECT_ACTION_KEY, action);
+  saveDriveRedirectPending(state, action);
 
   const redirectUri = getGoogleAuthRedirectUri();
   const params = new URLSearchParams({
@@ -1312,15 +1361,13 @@ const consumeGoogleDriveRedirect = (): { token: string; action: DriveRedirectAct
   const token = params.get('access_token');
   const expiresIn = Number(params.get('expires_in')) || 3600;
   const state = params.get('state');
-  const expectedState = sessionStorage.getItem(GOOGLE_DRIVE_REDIRECT_STATE_KEY);
-  const action = sessionStorage.getItem(GOOGLE_DRIVE_REDIRECT_ACTION_KEY) as DriveRedirectAction | null;
-  sessionStorage.removeItem(GOOGLE_DRIVE_REDIRECT_STATE_KEY);
-  sessionStorage.removeItem(GOOGLE_DRIVE_REDIRECT_ACTION_KEY);
+  const pending = getDriveRedirectPending();
+  clearDriveRedirectPending();
   window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.search}`);
 
-  if (!token || !state || state !== expectedState || !action) return null;
+  if (!token || !state || !pending || state !== pending.state) return null;
   storeDriveToken(token, expiresIn);
-  return { token, action };
+  return { token, action: pending.action };
 };
 
 // --- Components ---
@@ -7165,6 +7212,7 @@ export default function App() {
   const [releases, setReleases] = useState<any[]>([]);
   const [operationLogs, setOperationLogs] = useState<OperationLog[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
+  const [localDataReady, setLocalDataReady] = useState(false);
   const [importPreview, setImportPreview] = useState<PreparedImport | null>(null);
   const [importInProgress, setImportInProgress] = useState(false);
   const [driveStatus, setDriveStatus] = useState<DriveBackupStatus>({
@@ -7451,32 +7499,47 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      setLocalDataReady(false);
+      return;
+    }
     const safeDocs = (snap: any) => Array.isArray(snap?.docs) ? snap.docs : [];
+    const readyCollections = new Set<string>();
+    const markReady = (name: string) => {
+      readyCollections.add(name);
+      if (readyCollections.size >= 6) setLocalDataReady(true);
+    };
+    setLocalDataReady(false);
 
     const unsubCustomers = onSnapshot(query(col('customers'), orderBy('createdAt', 'desc')), (snap) => {
       setCustomers(safeDocs(snap).map(d => normalizeCustomer(d.id, d.data())));
+      markReady('customers');
     }, (err) => handleLocalDataError(err, OperationType.LIST, 'customers'));
 
     const unsubOrders = onSnapshot(query(col('orders'), orderBy('createdAt', 'desc')), (snap) => {
       setOrders(safeDocs(snap).map(d => normalizeOrder(d.id, d.data())));
+      markReady('orders');
     }, (err) => handleLocalDataError(err, OperationType.LIST, 'orders'));
 
     const unsubMachines = onSnapshot(query(col('machines'), orderBy('name', 'asc')), (snap) => {
       setMachines(safeDocs(snap).map(d => normalizeMachine(d.id, d.data())));
+      markReady('machines');
     }, (err) => handleLocalDataError(err, OperationType.LIST, 'machines'));
 
     const unsubReleases = onSnapshot(query(col('releases'), orderBy('createdAt', 'desc')), (snap) => {
       setReleases(safeDocs(snap).map(d => normalizeRelease(d.id, d.data())));
+      markReady('releases');
     }, (err) => handleLocalDataError(err, OperationType.LIST, 'releases'));
 
     const unsubOperationLogs = onSnapshot(query(col('operationLogs'), orderBy('createdAt', 'desc')), (snap) => {
       setOperationLogs(safeDocs(snap).map(d => normalizeOperationLog(d.id, d.data())).slice(0, 100));
+      markReady('operationLogs');
     }, (err) => handleLocalDataError(err, OperationType.LIST, 'operationLogs'));
 
     const unsubSettings = onSnapshot(dbDoc('settings', 'global'), (snap) => {
       if (snap.exists()) {
         setSettings(normalizeSettings(snap.id, snap.data()));
+        markReady('settings');
       } else {
         // Initialize default settings
         const defaultSettings: Omit<SystemSettings, 'id'> = {
@@ -7485,6 +7548,7 @@ export default function App() {
           lastBackupAt: new Date().toISOString()
         };
         setDoc(dbDoc('settings', 'global'), defaultSettings).catch(err => handleLocalDataError(err, OperationType.WRITE, 'settings/global'));
+        markReady('settings');
       }
     }, (err) => handleLocalDataError(err, OperationType.GET, 'settings/global'));
 
@@ -7985,6 +8049,7 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (!localDataReady) return;
     const redirectResult = consumeGoogleDriveRedirect();
     if (!redirectResult) return;
 
@@ -7996,7 +8061,7 @@ export default function App() {
     } else {
       refreshDriveBackups(redirectResult.token, false);
     }
-  }, [uploadDriveData, downloadDriveData, refreshDriveBackups, showToast]);
+  }, [localDataReady, uploadDriveData, downloadDriveData, refreshDriveBackups, showToast]);
 
   const clearData = async () => {
     setConfirmModal({
