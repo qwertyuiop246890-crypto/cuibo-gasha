@@ -184,7 +184,7 @@ const optionalIsoString = (value: any) => typeof value === 'string' && value ? v
 const optionalText = (value: any) => typeof value === 'string' && value.trim() ? value.trim() : undefined;
 
 const getItemTimelineValue = (item: OrderItem, order: Pick<Order, 'createdAt' | 'updatedAt'>, type: TimelineFilterType) => {
-  if (type === 'createdAt') return order.createdAt || item.createdAt;
+  if (type === 'createdAt') return item.createdAt || order.createdAt;
   if (type === 'callTime') return item.callTime || item.createdAt || order.createdAt;
   if (type === 'updatedAt') return item.updatedAt || order.updatedAt || item.createdAt || order.createdAt;
   if (type === 'releaseAt') return item.releaseAt;
@@ -2823,7 +2823,7 @@ const OrdersList = ({
       orderId: order.id,
       customerName: order.customerName,
       customerId: order.customerId,
-      orderCreatedAt: order.createdAt,
+      orderCreatedAt: item.createdAt || order.createdAt,
       orderUpdatedAt: order.updatedAt,
       orderTime: getItemTimelineValue(item, order, dateFilterType)
     }))
@@ -2977,7 +2977,7 @@ const OrdersList = ({
                     </span>
                   </div>
                   <div className="flex flex-col items-end gap-1">
-                    <span className="text-xs text-ink/40 tracking-tight">建立：{formatDateTime(item.orderCreatedAt)}</span>
+                    <span className="text-xs text-ink/40 tracking-tight">建立：{formatDateTime(item.createdAt || item.orderCreatedAt)}</span>
                     <span className="text-xs text-ink/40 tracking-tight">喊單：{formatDateTime(item.callTime || item.createdAt)}</span>
                     {item.releaseAt && <span className="text-[10px] text-orange-500 tracking-tight">釋出：{formatDateTime(item.releaseAt)}</span>}
                     {item.transferAt && <span className="text-[10px] text-primary-blue tracking-tight">轉讓：{formatDateTime(item.transferAt)}</span>}
@@ -5065,13 +5065,13 @@ const CustomerDetailView = ({
   };
 
   const groupOrderItems = (order: Order) => {
-    const grouped: (OrderItem & { rawIds: string[] })[] = [];
+    const grouped: (OrderItem & { rawIds: string[]; rawCreatedTimes?: string[] })[] = [];
     order.items.forEach(item => {
       const isReleased = releases.some(r => r.orderId === order.id && r.itemId === item.id && r.status === 'pending');
       
       // If it's released, do not group it, push it individually
       if (isReleased) {
-        grouped.push({ ...item, rawIds: [item.id] });
+        grouped.push({ ...item, rawIds: [item.id], rawCreatedTimes: [item.createdAt].filter(Boolean) });
         return;
       }
 
@@ -5088,8 +5088,9 @@ const CustomerDetailView = ({
         existing.quantity += item.quantity;
         existing.subtotal += item.subtotal;
         existing.rawIds.push(item.id);
+        existing.rawCreatedTimes = [...(existing.rawCreatedTimes || []), item.createdAt].filter(Boolean);
       } else {
-        grouped.push({ ...item, rawIds: [item.id] });
+        grouped.push({ ...item, rawIds: [item.id], rawCreatedTimes: [item.createdAt].filter(Boolean) });
       }
     });
 
@@ -5412,6 +5413,13 @@ const CustomerDetailView = ({
                   // Since all raw items in the group have the same machine & variant, it's safe to visually track the first one
                   const isReleased = item.rawIds.some(rawId => releases.some(r => r.orderId === order.id && r.itemId === rawId && r.status === 'pending'));
                   const machine = machines.find(m => m.name === item.machineName);
+                  const createdTimes = (item.rawCreatedTimes || [item.createdAt])
+                    .map(value => value ? new Date(value).getTime() : 0)
+                    .filter(value => Number.isFinite(value) && value > 0)
+                    .sort((a, b) => a - b);
+                  const createdTimeLabel = createdTimes.length > 1 && createdTimes[0] !== createdTimes[createdTimes.length - 1]
+                    ? `${formatDateTime(new Date(createdTimes[0]).toISOString())} ~ ${formatDateTime(new Date(createdTimes[createdTimes.length - 1]).toISOString())}`
+                    : formatDateTime(item.createdAt || order.createdAt);
                   return (
                     <div key={`${item.id}-${idx}`} className="flex flex-col gap-2 p-4 bg-background rounded-2xl relative group">
                     <div className="flex justify-between items-start">
@@ -5463,7 +5471,7 @@ const CustomerDetailView = ({
                             <p className="text-[10px] text-ink/30">喊單 {formatDateTime(item.callTime || item.createdAt)}</p>
                           </div>
                           <div className="flex flex-wrap gap-x-2 gap-y-1 mt-1">
-                            <p className="text-[10px] text-ink/30">建立 {formatDateTime(order.createdAt)}</p>
+                            <p className="text-[10px] text-ink/30">建立 {createdTimeLabel}</p>
                             {item.releaseAt && <p className="text-[10px] text-orange-500">釋出 {formatDateTime(item.releaseAt)}</p>}
                             {item.transferAt && <p className="text-[10px] text-primary-blue">轉讓 {formatDateTime(item.transferAt)}</p>}
                             {item.exchangeAt && <p className="text-[10px] text-green-600">交換 {formatDateTime(item.exchangeAt)}</p>}
