@@ -1305,10 +1305,14 @@ const isDriveAuthError = (err: unknown) => {
 
 const handleDriveAuthExpired = (
   setDriveStatus: React.Dispatch<React.SetStateAction<any>>,
-  showToast: (message: string, type?: 'success' | 'error') => void
+  showToast: (message: string, type?: 'success' | 'error') => void,
+  err?: unknown
 ) => {
   clearDriveToken();
-  const message = 'Google 授權已失效。請按「登入/重新授權」重新授權後，再按一次上傳或下載。';
+  const rawMessage = err instanceof Error ? err.message : String(err || '');
+  const message = rawMessage
+    ? `Google Drive 不接受目前授權，已停止自動重複授權。錯誤內容：${rawMessage}`
+    : 'Google Drive 不接受目前授權，已停止自動重複授權。請按「登入/重新授權」後再重試。';
   setDriveStatus(prev => ({
     ...prev,
     connected: false,
@@ -7518,7 +7522,7 @@ export default function App() {
     setDriveStatus(prev => ({ ...prev, loading: true, message: '正在登入 Google Drive...' }));
     try {
       const token = getStoredDriveToken() || await requestGoogleDriveToken();
-      await validateDriveToken(token);
+      await listDriveBackups(token);
       setDriveStatus(prev => ({ ...prev, connected: true, loading: false, message: 'Google Drive 已登入，可直接備份' }));
       showToast('Google Drive 已登入');
     } catch (err) {
@@ -7752,7 +7756,6 @@ export default function App() {
     setDriveStatus(prev => ({ ...prev, loading: true, message: '正在讀取 Google Drive 備份...' }));
     try {
       const token = tokenOverride || getStoredDriveToken() || await requestGoogleDriveToken();
-      await validateDriveToken(token);
       storeDriveToken(token);
       const files = await listDriveBackups(token);
       setDriveStatus({
@@ -7768,7 +7771,7 @@ export default function App() {
         return;
       }
       if (isDriveAuthError(err)) {
-        handleDriveAuthExpired(setDriveStatus, showToast);
+        handleDriveAuthExpired(setDriveStatus, showToast, err);
         return;
       }
       const message = getDriveErrorMessage(err);
@@ -7803,7 +7806,6 @@ export default function App() {
     setDriveStatus(prev => ({ ...prev, loading: true, message: '正在上傳 Google Drive 備份...' }));
     try {
       const token = tokenOverride || getStoredDriveToken() || await requestGoogleDriveToken();
-      await validateDriveToken(token);
       storeDriveToken(token);
       const payload = await buildBackupData();
       const uploaded = await uploadDriveBackup(token, payload);
@@ -7825,7 +7827,7 @@ export default function App() {
         return;
       }
       if (isDriveAuthError(err)) {
-        handleDriveAuthExpired(setDriveStatus, showToast);
+        handleDriveAuthExpired(setDriveStatus, showToast, err);
         return;
       }
       const message = getDriveErrorMessage(err);
@@ -7843,7 +7845,6 @@ export default function App() {
     setDriveStatus(prev => ({ ...prev, loading: true, message: '正在讀取 Google Drive 備份...' }));
     try {
       const token = tokenOverride || getStoredDriveToken() || await requestGoogleDriveToken();
-      await validateDriveToken(token);
       storeDriveToken(token);
       const files = driveStatus.files.length > 0 ? driveStatus.files : await listDriveBackups(token);
       const latest = files[0];
@@ -7890,7 +7891,7 @@ export default function App() {
         return;
       }
       if (isDriveAuthError(err)) {
-        handleDriveAuthExpired(setDriveStatus, showToast);
+        handleDriveAuthExpired(setDriveStatus, showToast, err);
         return;
       }
       const message = getDriveErrorMessage(err);
