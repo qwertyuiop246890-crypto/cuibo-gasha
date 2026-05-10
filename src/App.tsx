@@ -1273,7 +1273,16 @@ const uploadDriveBackup = async (token: string, payload: BackupPayload) => {
 
 const downloadDriveBackup = async (token: string, fileId: string) => {
   const response = await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, token);
-  return response.json();
+  const text = await response.text();
+
+  try {
+    return {
+      data: JSON.parse(text),
+      size: new Blob([text]).size || text.length,
+    };
+  } catch {
+    throw new Error('雲端備份檔不是有效 JSON，請改下載上一個備份版本或重新上傳。');
+  }
 };
 
 const getDriveErrorMessage = (err: unknown) => {
@@ -7860,8 +7869,12 @@ export default function App() {
       const cloudBackupAt = latest.createdTime || latest.modifiedTime;
       const proceed = async () => {
         setDriveStatus(prev => ({ ...prev, loading: true, message: '正在下載最新雲端備份...' }));
-        const data = await downloadDriveBackup(token, latest.id);
-        const prepared = prepareImportPayload(data, latest.name, Number(latest.size) || JSON.stringify(data).length);
+        const downloaded = await downloadDriveBackup(token, latest.id);
+        const prepared = prepareImportPayload(
+          downloaded.data,
+          latest.name,
+          Number(latest.size) || downloaded.size,
+        );
         setImportPreview(prepared);
         setDriveStatus({ connected: true, loading: false, latest, files, message: '雲端備份已下載，請確認匯入預覽' });
         showToast('雲端備份已下載，請確認後開始匯入');
