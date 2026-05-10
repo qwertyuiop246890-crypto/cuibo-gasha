@@ -1012,9 +1012,11 @@ const getGoogleAuthRedirectUri = () => `${window.location.origin}${window.locati
 
 const isMobileDriveAuthContext = () => {
   const ua = navigator.userAgent || '';
+  const platform = navigator.platform || '';
   const isMobile = /Android|iPhone|iPad|iPod/i.test(ua);
+  const isIpadDesktopMode = /Macintosh/i.test(ua) && /Mac/i.test(platform) && navigator.maxTouchPoints > 1;
   const isStandalone = window.matchMedia?.('(display-mode: standalone)').matches || (navigator as any).standalone === true;
-  return isMobile || isStandalone;
+  return isMobile || isIpadDesktopMode || isStandalone;
 };
 
 const getStoredDriveToken = () => {
@@ -7077,7 +7079,7 @@ const SettingsView = ({
             className="p-4 bg-background rounded-2xl flex flex-col items-center gap-2 text-ink/60 hover:bg-ink/5 transition-colors disabled:opacity-50"
           >
             <CheckCircle2 className="w-5 h-5" />
-            <span className="text-[10px] font-bold">{driveStatus.connected ? '已連線雲端' : '登入雲端'}</span>
+            <span className="text-[10px] font-bold">{driveStatus.connected ? '已連線雲端' : '登入/重新授權'}</span>
           </button>
           <button
             onClick={logoutGoogleDrive}
@@ -7104,6 +7106,10 @@ const SettingsView = ({
             <span className="text-[10px] font-bold">下載雲端備份</span>
           </button>
         </div>
+
+        <p className="mt-3 text-xs font-medium text-ink/45">
+          手機瀏覽器通常不會顯示 Google 彈出視窗；請使用「登入/重新授權」，系統會改用同頁授權後自動回到 APP。
+        </p>
 
         <div className="mt-4 rounded-2xl bg-background p-4">
           <p className="text-[10px] font-bold text-ink/35 uppercase">雲端狀態</p>
@@ -7467,6 +7473,17 @@ export default function App() {
   const connectGoogleDrive = useCallback(async () => {
     if (!googleClientId) {
       showToast('尚未設定 Google OAuth Client ID', 'error');
+      return;
+    }
+    if (isMobileDriveAuthContext()) {
+      clearDriveToken();
+      setDriveStatus(prev => ({
+        ...prev,
+        connected: false,
+        loading: true,
+        message: '正在開啟 Google 同頁授權...'
+      }));
+      startGoogleDriveRedirect('refresh');
       return;
     }
     setDriveStatus(prev => ({ ...prev, loading: true, message: '正在登入 Google Drive...' }));
